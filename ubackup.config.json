@@ -1,0 +1,20 @@
+{
+    "Backup-btrfs": {
+        "last-snapshot": "2019-04-05",
+        "subvolume": "@Data",
+        "type": "destination",
+        "uuid": "79128545-fd0b-4949-a2f0-3625a4ebe00e"
+    },
+    "Backup-fat": {
+        "last-snapshot": "2019-04-05",
+        "subvolume": "@Data",
+        "type": "destination",
+        "uuid": "231C-120A"
+    },
+    "Data": {
+        "last-snapshot": "2019-04-05",
+        "subvolume": "@Data",
+        "type": "source",
+        "uuid": "600ce7b9-c37f-40b4-a393-ebd3dec18d7f"
+    }
+}
