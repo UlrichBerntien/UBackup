@@ -1,20 +1,44 @@
 {
-    "Backup-btrfs": {
-        "last-snapshot": "2019-04-05",
-        "subvolume": "@Data",
+    "tst-backup-btrfs": {
+        "comment": "Test backup volume, btrfs partition",
+        "last-snapshot": "2019-04-07",
+        "subvolume": "@Testdata",
         "type": "destination",
         "uuid": "79128545-fd0b-4949-a2f0-3625a4ebe00e"
     },
-    "Backup-fat": {
-        "last-snapshot": "2019-04-05",
-        "subvolume": "@Data",
+    "tst-backup-fat": {
+        "comment": "Test backup volume, exfat partition",
+        "last-snapshot": "2019-04-07",
+        "subvolume": "@Testdata",
         "type": "destination",
         "uuid": "231C-120A"
     },
-    "Data": {
-        "last-snapshot": "2019-04-05",
-        "subvolume": "@Data",
+    "tst-data": {
+        "comment": "Test data source",
+        "last-snapshot": "2019-04-07",
+        "subvolume": "@Testdata",
         "type": "source",
         "uuid": "600ce7b9-c37f-40b4-a393-ebd3dec18d7f"
+    },
+    "data": {
+        "comment": "Data drive in laptop",
+        "last-snapshot": null,
+        "subvolume": "@Data",
+        "type": "source",
+        "uuid": "482b0d11-8b94-4450-be72-c8f64fab7d91"
+    },
+    "backup-A-btrfs": {
+        "comment": "External drive A, btrfs partition",
+        "last-snapshot": null,
+        "subvolume": "@Data",
+        "type": "destination",
+        "uuid": "a3379c7c-b2d1-4081-9c0c-28c747f38177"
+    },
+    "backup-A-fat": {
+        "comment": "External drive A, exfat partition",
+        "last-snapshot": null,
+        "subvolume": "@Data",
+        "type": "destination",
+        "uuid": "C84C-B68C"
     }
 }

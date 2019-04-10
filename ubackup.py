@@ -31,6 +31,7 @@ value is a dictionary with details to the volume. The details are:
 - uuid: UUID of the volume used to mount the volume.
 - type: "source" or "destination"
 - last-snapshot: null or the date of the last stored snapshot.
+- comment: Comment text to the subvolume
 """
 
 #########################################################################################
@@ -64,6 +65,9 @@ CONFIG_FILE = "ubackup.config.json"
 
 # The date of the backup is a constant during running the backup script.
 # The date at the script start is used.
+# Because the snapshots containing the date only one snapshot per day is
+# possible with this tool. More snapshots are possible if e.g. the hour
+# is added to the backup date stamp.
 BACKUP_DATE = datetime.date.today().isoformat()
 
 # The name part of all snapshot subvolumes.
@@ -108,8 +112,8 @@ class Logging:
     Processing all text output to the user.
     The class is used like a singleton object: The methods are class-methods.
     The members are class-variables.
-    It is a simple logging replacement. Maybe later logging could be used.
     """
+    # TODO use Python Logging & add cmdline options: log to stdout or file
 
     # Flag indicating verbose output
     _verbose = False
@@ -181,6 +185,9 @@ class Config:
     # 0 = no config, 1 = config loaded, 2 = config changed
     _status: int = 0
 
+    # Verbose level
+    _verbose: int = 0
+
     @staticmethod
     def get_default() -> str:
         """
@@ -199,11 +206,33 @@ class Config:
         return ''
 
     @classmethod
+    def set_verbose(cls, level: int) -> None:
+        """
+        Stores the verbose level.
+            0: no info message output
+            1: info message output from this script
+            2: level 1 + verbose pass through to all called tools
+        :param level: 0,1 or 2.
+        """
+        precondition(0 <= level <= 3)
+        cls._verbose = level
+        Logging.set_verbose(level > 0)
+
+    @classmethod
+    def get_verbose(cls) -> int:
+        """
+        Get the current verbose level.
+        :return: 0, 1, or 2.
+        """
+        return cls._verbose
+
+    @classmethod
     def check_item(cls, name: str) -> bool:
         """
-        Checks if a valid backup volume is given.
-        :param name: Name of the volume
-        :return: True if and only if the item is valid.
+        Checks if a valid backup configuration item is given.
+        Log errors if the configuration item is not valid.
+        :param name: Name of the backup configuration item.
+        :return: True if and only if the configuration item is valid.
         """
         precondition(not_empty_str(name))
         precondition(cls._status > 0)
@@ -226,6 +255,7 @@ class Config:
     def check_destination(cls, name: str) -> bool:
         """
         Checks if a valid destination is given.
+        Log errors if the item is not a destination.
         :param name: Name of the backup destination.
         :return: True if and only if the destination is valid.
         """
@@ -253,9 +283,10 @@ class Config:
     @classmethod
     def check_source(cls, name: str) -> bool:
         """
-        Checks if a valid destination is given.
-        :param name: Name of the backup destination.
-        :return: True if and only if the destination is valid.
+        Checks if a valid source subvolume configuration is given.
+        Log errors if the item is not a source subvolume.
+        :param name: Name of the backup source subvolume.
+        :return: True if and only if the source subvolume configuration is valid.
         """
         precondition(not_empty_str(name))
         precondition(cls._status > 0)
@@ -266,6 +297,17 @@ class Config:
             Logging.error(f"backup source {name} has not type source")
             return False
         return True
+
+    @classmethod
+    def is_destination(cls, name: str) -> str:
+        """
+        Checks if the configuration has type destination.
+        :param name:  The name of the configuration item.
+        :return: True if and only if the item has type destination.
+        """
+        precondition(cls.check_item(name))
+        precondition(cls._status > 0)
+        return cls._raw_config[name]["type"] == "destination"
 
     @classmethod
     def get_source(cls, destination: str) -> str:
@@ -460,9 +502,31 @@ class Run:
     """
 
     @staticmethod
+    def _verbose() -> List[str]:
+        """
+        Returns optional the verbose switch.
+        The verbose switch is passed through to the called tools if
+        verbose level is 2 or higher.
+        :return: List with verbose switch or empty list.
+        """
+        return ["--verbose"] if Config.get_verbose() >= 2 else []
+
+    @staticmethod
+    def _verbose_short() -> List[str]:
+        """
+        Returns optional the short (-v) verbose switch.
+        The verbose switch is passed through to the called tools if
+        verbose level is 2 or higher.
+        :return: List with short verbose switch (-v) or empty list.
+        """
+        return ["-v"] if Config.get_verbose() >= 2 else []
+
+    @staticmethod
     def mount(uuid: str, mount_point: str, readonly: bool) -> None:
         """
         Mounts a volume.
+        If not BTRFS volume is already mounted, then a bind mount will be
+        done. BTRFS volumes could be mounted several times.
         On an error: logs an error message and raises a Runtime exception.
         :param uuid: The uuid of the volume to mount.
         :param mount_point: Prepared mount point
@@ -475,14 +539,15 @@ class Run:
         if readonly:
             options += ",ro"
         current_mount_point = BlockDeviceList.mount_point(uuid)
-        if current_mount_point:
+        is_btrfs = BlockDeviceList.is_filesystem_btrfs(uuid)
+        if current_mount_point and not is_btrfs:
             options += ",bind"
             source = ["--bind", current_mount_point]
         else:
             source = ["--uuid", uuid]
         error = subprocess.call(
-            ["mount", "--no-mtab", "--options", options,
-             "--target", mount_point] + source)
+            ["mount"] + Run._verbose() + ["--no-mtab", "--options", options,
+                                          "--target", mount_point] + source)
         if error:
             Logging.error_raise(f"mount of {uuid} failed")
         return
@@ -495,9 +560,8 @@ class Run:
         :param mount_point: The mount point of the file system.
         """
         precondition(os.path.exists(mount_point))
-        error = subprocess.call(["umount",
-                                 "--lazy", "--no-mtab",
-                                 mount_point])
+        error = subprocess.call(["umount"] + Run._verbose() +
+                                ["--lazy", "--no-mtab", mount_point])
         if error:
             Logging.error_raise(f"umount failed")
         return
@@ -534,10 +598,10 @@ class Run:
         precondition(common_snapshot is None or os.path.exists(common_snapshot))
         parent = ["-p", common_snapshot] if common_snapshot else []
         sender = subprocess.Popen(
-            ["btrfs", "send"] + parent + [source],
+            ["btrfs", "send"] + Run._verbose() + parent + [source],
             stdout=subprocess.PIPE)
         receiver = subprocess.Popen(
-            ["btrfs", "receive", destination],
+            ["btrfs", "receive"] + Run._verbose_short() + [destination],
             stdin=sender.stdout)
         sender.stdout.close()
         receiver.communicate()
@@ -558,10 +622,14 @@ class Run:
         precondition(os.path.exists(destination))
         precondition(destination.find(SNAPSHOT_NAME_MIDDLE) > 0)
         if fat_mode:
-            # do not use --archive on FAT because user and group change will not work
-            options = ["--times", "--links", "--recursive"]
+            # Do not use --archive on FAT because user and group change
+            # will not work. Use a time compare window of a little more than
+            # 1 hour (=3600s) to prevent a file copy based on DST changes
+            # because FAT stores the local time.
+            options = ["--times", "--links", "--recursive", "--modify-window=3700"]
         else:
             options = ["--archive", ]
+        options += Run._verbose()
         error = subprocess.call(
             ["rsync", "--one-file-system", "--delete-before"] +
             options +
@@ -927,26 +995,35 @@ def check_copied_files(source: str, destination: str = None) -> None:
     # TODO, implement the function
 
 
-def backup_to(destination: str) -> None:
+def backup_to(item: str) -> None:
     """
-    Create a backup on the given destination.
-    :param destination: Name of the backup volume to use.
+    Create a backup or snapshot on the given item.
+    :param item: Name of the backup volume to use.
     """
-    precondition(Config.check_destination(destination))
-    source = Config.get_source(destination)
+    precondition(Config.check_item(item))
+    if Config.is_destination(item):
+        # make a snapshot on source and copy to destination
+        source = Config.get_source(item)
+        destination = item
+    else:
+        # only make a snapshot on source
+        source = item
+        destination = None
     if Config.check_source(source):
-        Logging.info(f"backup from {source} to {destination}")
+        Logging.info(f"snapshot {source}")
         make_snapshot(source)
         check_copied_files(source)
         Config.set_last_snapshot(source, BACKUP_DATE)
-        if BlockDeviceList.is_filesystem_btrfs(Config.get_uuid(destination)):
-            # destination is also BTRFS: send the snapshot
-            copy_snapshot(source, destination)
-        else:
-            # Copy the files from the snapshot
-            copy_files(source, destination)
-        check_copied_files(source, destination)
-        Config.set_last_snapshot(destination, BACKUP_DATE)
+        if destination and Config.check_destination(destination):
+            Logging.info(f"backup from {source} to {destination}")
+            if BlockDeviceList.is_filesystem_btrfs(Config.get_uuid(destination)):
+                # destination is also BTRFS: send the snapshot
+                copy_snapshot(source, destination)
+            else:
+                # Copy the files from the snapshot
+                copy_files(source, destination)
+            check_copied_files(source, destination)
+            Config.set_last_snapshot(destination, BACKUP_DATE)
     return
 
 
@@ -965,7 +1042,7 @@ def main(description: str = None):
         metavar='DESTINATION',
         type=str,
         nargs='+',
-        help='Backup to this destination')
+        help='Backup to this destination, or only snapshot this source')
     parser.add_argument(
         '--conf', '-C',
         metavar='CONFIG',
@@ -975,20 +1052,20 @@ def main(description: str = None):
         default=Config.get_default())
     parser.add_argument(
         '--verbose', '-v',
-        action='store_true',
-        help='Verbose logging to stdout')
+        action='count',
+        help='Verbose 1: logging info messages, 2: verbose to called tools')
     arguments = parser.parse_args()
-    Logging.set_verbose(arguments.verbose)
+    Config.set_verbose(arguments.verbose)
     try:
         Config.load(arguments.conf)
         Logging.info(f"creating backups with date {BACKUP_DATE}")
         if os.geteuid() != 0:
             Logging.error_raise("Backup mounts the volumes. So it must run as root.")
         for destination in arguments.destinations:
-            if Config.check_destination(destination):
+            if Config.check_item(destination):
                 backup_to(destination)
             else:
-                Logging.error(f"unknown backup destination {destination}")
+                Logging.error(f"invalid backup destination {destination}")
         # The last snapshots are stored in the configuration file.
         Config.update(arguments.conf)
         # TODO, thin away old backups/snapshots on all destinations and all referenced sources
@@ -1003,3 +1080,4 @@ def main(description: str = None):
 if __name__ == '__main__':
     # The file doc string is the description of the program
     main(__doc__)
+    # TODO: set return codes
