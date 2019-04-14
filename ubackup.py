@@ -92,7 +92,7 @@ def precondition(condition: bool) -> None:
     :param condition: True if the program works correct.
     """
     if not condition:
-        raise RuntimeError('Precondition failed. Program bug.')
+        raise RuntimeError("Precondition failed. Program bug.")
 
 
 def not_empty_str(string: str) -> bool:
@@ -203,20 +203,25 @@ class Config:
             if os.path.exists(test):
                 return test
         # Config file not found at default locations
-        return ''
+        return ""
 
     @classmethod
-    def set_verbose(cls, level: int) -> None:
+    def set_verbose(cls, level) -> None:
         """
         Stores the verbose level.
             0: no info message output
             1: info message output from this script
             2: level 1 + verbose pass through to all called tools
-        :param level: 0,1 or 2.
+        :param level: integer (0,1 or 2) or other type (False => 0, True => 1)
         """
-        precondition(0 <= level <= 3)
-        cls._verbose = level
-        Logging.set_verbose(level > 0)
+        if isinstance(level, int):
+            precondition(0 <= level <= 3)
+            cls._verbose = level
+        elif level:
+            cls._verbose = 1
+        else:
+            cls._verbose = 0
+        Logging.set_verbose(cls._verbose > 0)
 
     @classmethod
     def get_verbose(cls) -> int:
@@ -240,7 +245,7 @@ class Config:
             Logging.error(f"item {name} not defined.")
             return False
         cfg = cls._raw_config[name]
-        if "type" not in cfg or cfg["type"] not in ('destination', 'source'):
+        if "type" not in cfg or cfg["type"] not in ("destination", "source"):
             Logging.error(f"item {name} has no valid type")
             return False
         if "uuid" not in cfg or not cfg["uuid"]:
@@ -308,6 +313,20 @@ class Config:
         precondition(cls.check_item(name))
         precondition(cls._status > 0)
         return cls._raw_config[name]["type"] == "destination"
+
+    @classmethod
+    def list_name(cls, uuid: List[str]) -> List[str]:
+        """
+        List the names of all subvolumes on volumes with the given uuid.
+        Destination and source subvolumes will be included in the list.
+        The returned list could be empty.
+        :param uuid: list of UUIDs
+        :return: List of names.
+        """
+        precondition(cls._status > 0)
+        return [name
+                for name in cls._raw_config.keys()
+                if cls._raw_config[name]["uuid"] in uuid]
 
     @classmethod
     def get_source(cls, destination: str) -> str:
@@ -401,7 +420,7 @@ class Config:
             else:
                 Logging.info("Reopen configuration file for write")
                 file.close()
-                file = open(file.name, 'wt')
+                file = open(file.name, "wt")
             Logging.info("write configuration file")
             json.dump(cls._raw_config, file, indent=4, sort_keys=True)
 
@@ -491,6 +510,16 @@ class BlockDeviceList:
         """
         precondition(not_empty_str(uuid))
         return BlockDeviceList.mount_point(uuid) is not None
+
+    @staticmethod
+    def list_uuid() -> List[str]:
+        """
+        Gets list of the UUIDs of all connected block devices.
+        The returned list could be empty.
+        :return: List of UUIDs
+        """
+        devices = BlockDeviceList._lsblk()
+        return [x["uuid"] for x in devices["blockdevices"] if "uuid" in x and x["uuid"]]
 
 
 #########################################################################################
@@ -1027,6 +1056,16 @@ def backup_to(item: str) -> None:
     return
 
 
+def collect_all() -> List[str]:
+    """
+    Collect names of all connected volumes.
+    The returned could be empty.
+    :return: List of all sources/destinations available now.
+    """
+    connected = BlockDeviceList.list_uuid()
+    return Config.list_name(connected)
+
+
 def main(description: str = None):
     """
     Backup BTRFS subvolumes.
@@ -1038,22 +1077,26 @@ def main(description: str = None):
     # Main argument is a list of backup destinations.
     # The backup sources will be found in the configuration file.
     parser.add_argument(
-        'destinations',
-        metavar='DESTINATION',
+        "destinations",
+        metavar="DESTINATION",
         type=str,
-        nargs='+',
-        help='Backup to this destination, or only snapshot this source')
+        nargs="*",
+        help="Backup to this destination, or only snapshot this source")
     parser.add_argument(
-        '--conf', '-C',
-        metavar='CONFIG',
+        "--conf", "-C",
+        metavar="CONFIG",
         type=argparse.FileType(),
-        nargs='?',
-        help='configuration file name',
+        nargs="?",
+        help="configuration file name",
         default=Config.get_default())
     parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        help='Verbose 1: logging info messages, 2: verbose to called tools')
+        "--verbose", "-v",
+        action="count",
+        help="Verbose 1: logging info messages, 2: verbose to called tools")
+    parser.add_argument(
+        "--all", "-a",
+        action="store_true",
+        help="Snapshot all online sources, backup to all online destinations")
     arguments = parser.parse_args()
     Config.set_verbose(arguments.verbose)
     try:
@@ -1061,14 +1104,19 @@ def main(description: str = None):
         Logging.info(f"creating backups with date {BACKUP_DATE}")
         if os.geteuid() != 0:
             Logging.error_raise("Backup mounts the volumes. So it must run as root.")
-        for destination in arguments.destinations:
+        if not job_list:
+            if arguments.all:
+                Logging.warning("no configured volumes are online")
+            else:
+                Logging.error_raise("no backup destinations given")
+        for destination in job_list:
             if Config.check_item(destination):
                 backup_to(destination)
             else:
                 Logging.error(f"invalid backup destination {destination}")
         # The last snapshots are stored in the configuration file.
         Config.update(arguments.conf)
-        # TODO, thin away old backups/snapshots on all destinations and all referenced sources
+        # TODO: thin away old backups/snapshots on all in job_list and all referenced sources
     except RuntimeError as error:
         print(f"ABORT ON ERROR: {error}")
     finally:
@@ -1077,7 +1125,7 @@ def main(description: str = None):
     return
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # The file doc string is the description of the program
     main(__doc__)
     # TODO: set return codes
