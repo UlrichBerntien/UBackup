@@ -19,7 +19,11 @@ To BTRFS volumes a send - receive of snapshots is done.
 
 To other volumes a rsync is done. To FAT volumes the simple "--archive" flag
 is not used because user information could not stored on FAT volumes. To all
-other filesystems a "rsync --archive" call is used.
+other filesystems a "rsync --archive" call is used. To FAT volumes a time
+tolerance of 3700s (approx. 1h) is used to prevent a copy of all files after
+DST change because FAT uses the local time.
+
+The program return code is 0 on success and 1 on a non recoverable error.
 
 The default configuration is ubackup.conf.json located  beside the script file,
 in the current work directory or in ~/.config.
@@ -1063,14 +1067,19 @@ def collect_all() -> List[str]:
     :return: List of all sources/destinations available now.
     """
     connected = BlockDeviceList.list_uuid()
-    return Config.list_name(connected)
+    names = Config.list_name(connected)
+    Logging.info(f"connected are: $(', '.join(names))")
+    return names
 
 
-def main(description: str = None):
+def main(description: str = None) -> int:
     """
     Backup BTRFS subvolumes.
     :param description: Description of the program.
+    :return: 0 = success, 1 = error
     """
+    # Set result code to error at start and later on success reset
+    result = 1
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1101,6 +1110,7 @@ def main(description: str = None):
     Config.set_verbose(arguments.verbose)
     try:
         Config.load(arguments.conf)
+        job_list = arguments.destinations if not arguments.all else collect_all()
         Logging.info(f"creating backups with date {BACKUP_DATE}")
         if os.geteuid() != 0:
             Logging.error_raise("Backup mounts the volumes. So it must run as root.")
@@ -1117,15 +1127,17 @@ def main(description: str = None):
         # The last snapshots are stored in the configuration file.
         Config.update(arguments.conf)
         # TODO: thin away old backups/snapshots on all in job_list and all referenced sources
+        # program end without errors:
+        result = 0
     except RuntimeError as error:
         print(f"ABORT ON ERROR: {error}")
     finally:
         # Clean up
         MountPoints.umount_all()
-    return
+    return result
 
 
 if __name__ == "__main__":
     # The file doc string is the description of the program
-    main(__doc__)
-    # TODO: set return codes
+    status: int = main(__doc__)
+    sys.exit(status)
