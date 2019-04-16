@@ -28,14 +28,24 @@ The program return code is 0 on success and 1 on a non recoverable error.
 The default configuration is ubackup.conf.json located  beside the script file,
 in the current work directory or in ~/.config.
 
-The configuration file has json format.
-The configuration is one dictionary. The key is the name of the volume, the
+The configuration file has json format. The subvolumes to backup and the
+logging is configured in the file.
+
+The top level element in the configuration is a dictionary with the two keys
+backup and logging.
+
+The configuration of the subvolumes to backup is in a dictionary with the key
+backup. In this sub dictipnary the key is the name of the volume, the
 value is a dictionary with details to the volume. The details are:
 - subvolume: Name of the subvolume. Name without "-Snapshot-YYYY-MM-DD".
 - uuid: UUID of the volume used to mount the volume.
-- type: "source" or "destination"
+- type: "source" or "destination".
 - last-snapshot: null or the date of the last stored snapshot.
-- comment: Comment text to the subvolume
+- comment: Comment text to the subvolume.
+
+The configuration of the logging is a dictionary with the key logging.
+The dictionary is passed throw the Python logging.config.dictConfig function.
+A -v or -vv switch overwrites the logging levels set in the config file.
 """
 
 #########################################################################################
@@ -54,14 +64,19 @@ import argparse
 import datetime
 import glob
 import json
+import logging
+import logging.config
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from typing import *
 
 #########################################################################################
 
+# Version
+UBACKUP_VERSION = "2019-04-16"
 
 # Default configuration file name.
 # Default location is beside the script.
@@ -108,67 +123,25 @@ def not_empty_str(string: str) -> bool:
     return isinstance(string, str) and string
 
 
+def error_raise(message: str) -> None:
+    """
+    Logs an error message and raise a RuntimeError exception.
+    :param message: The error message.
+    """
+    logging.error(message)
+    raise RuntimeError(message)
+
+
 #########################################################################################
 
 
-class Logging:
+class UTCFormatter(logging.Formatter):
     """
-    Processing all text output to the user.
-    The class is used like a singleton object: The methods are class-methods.
-    The members are class-variables.
+    Logging Formatter class to set UTC timestamps in log file.
+    The local time is difficult to analyse during DST time changes.
+    Therefore the log file uses UTC.
     """
-    # TODO use Python Logging & add cmdline options: log to stdout or file
-
-    # Flag indicating verbose output
-    _verbose = False
-
-    @classmethod
-    def set_verbose(cls, verbose: bool) -> None:
-        """
-        Sets the verbose level for all output.
-        :param verbose: True for verbose output, else False.
-        """
-        cls._verbose = verbose
-
-    @classmethod
-    def error(cls, message: str) -> None:
-        """
-        Prints error message.
-        :param message: Error message to print.
-        """
-        # No check of the message in the error logging.
-        # A raise in the error logging should be suppressed,
-        print("[X] " + message)
-
-    @classmethod
-    def error_raise(cls, message: str) -> None:
-        """
-        Prints error message and raise RunTimeException.
-        :param message: Error message to print.
-        """
-        # No check of the message in the error logging.
-        # A raise in the error logging should be suppressed,
-        cls.error(message)
-        raise RuntimeError(message)
-
-    @classmethod
-    def warning(cls, message: str) -> None:
-        """
-        Prints warning message.
-        :param message: Warning message to print.
-        """
-        precondition(not_empty_str(message))
-        print("[!] " + message)
-
-    @classmethod
-    def info(cls, message: str) -> None:
-        """
-        Prints info message but only in verbose mode.
-        :param message: Info message to print.
-        """
-        precondition(not_empty_str(message))
-        if cls._verbose:
-            print("[i] " + message)
+    converter = time.gmtime
 
 
 #########################################################################################
@@ -183,13 +156,20 @@ class Config:
 
     # The configuration in a dict.
     # This dict is read from and written to the configuration file.
-    _raw_config: dict = None
+    _raw: dict = None
+
+    # The backup configuration.
+    # The dictionary is a value of the _raw_config dictionary.
+    _backup: dict = None
 
     # Status of the configuration data in _raw_config.
     # 0 = no config, 1 = config loaded, 2 = config changed
     _status: int = 0
 
-    # Verbose level
+    # Verbose level.
+    # 0: no info message output
+    # 1: info message output from this script
+    # 2: level 1 + verbose pass through to all called tools
     _verbose: int = 0
 
     @staticmethod
@@ -213,19 +193,18 @@ class Config:
     def set_verbose(cls, level) -> None:
         """
         Stores the verbose level.
-            0: no info message output
-            1: info message output from this script
-            2: level 1 + verbose pass through to all called tools
+        Sets the ERROR or INFO logging level on verbose level 0 or >0.
         :param level: integer (0,1 or 2) or other type (False => 0, True => 1)
         """
         if isinstance(level, int):
             precondition(0 <= level <= 3)
             cls._verbose = level
-        elif level:
-            cls._verbose = 1
-        else:
-            cls._verbose = 0
-        Logging.set_verbose(cls._verbose > 0)
+            # Sets level to all logging steps
+            for item in logging.getLogger().handlers + [logging.getLogger()]:
+                item.setLevel(logging.INFO if cls._verbose > 0 else logging.ERROR)
+        # else:
+        #   ignore level==None, do not overwrite current logging configuration
+        return
 
     @classmethod
     def get_verbose(cls) -> int:
@@ -245,18 +224,18 @@ class Config:
         """
         precondition(not_empty_str(name))
         precondition(cls._status > 0)
-        if name not in cls._raw_config:
-            Logging.error(f"item {name} not defined.")
+        if name not in cls._backup:
+            logging.error(f"item {name} not defined.")
             return False
-        cfg = cls._raw_config[name]
+        cfg = cls._backup[name]
         if "type" not in cfg or cfg["type"] not in ("destination", "source"):
-            Logging.error(f"item {name} has no valid type")
+            logging.error(f"item {name} has no valid type")
             return False
         if "uuid" not in cfg or not cfg["uuid"]:
-            Logging.error(f"item {name} has no uuid")
+            logging.error(f"item {name} has no uuid")
             return False
         if "subvolume" not in cfg:
-            Logging.error(f"item {name} contains no subvolume name")
+            logging.error(f"item {name} contains no subvolume name")
             return False
         return True
 
@@ -272,20 +251,20 @@ class Config:
         precondition(cls._status > 0)
         if not cls.check_item(name):
             return False
-        cfg = cls._raw_config[name]
+        cfg = cls._backup[name]
         if cfg["type"] != "destination":
-            Logging.error(f"backup destination {name} has not type destination")
+            logging.error(f"backup destination {name} has not type destination")
             return False
-        subvolume = cls._raw_config[name]["subvolume"]
+        subvolume = cls._backup[name]["subvolume"]
         number_sources = 0
-        for value in cls._raw_config.values():
+        for value in cls._backup.values():
             if value["subvolume"] == subvolume and value["type"] == "source":
                 number_sources += 1
         if number_sources == 0:
-            Logging.error(f"no source defined for backup destination {name}")
+            logging.error(f"no source defined for backup destination {name}")
             return False
         if number_sources > 1:
-            Logging.error(f"more than one source defined for backup destination {name}")
+            logging.error(f"more than one source defined for backup destination {name}")
             return False
         return True
 
@@ -301,9 +280,9 @@ class Config:
         precondition(cls._status > 0)
         if not cls.check_item(name):
             return False
-        cfg = cls._raw_config[name]
+        cfg = cls._backup[name]
         if cfg["type"] != "source":
-            Logging.error(f"backup source {name} has not type source")
+            logging.error(f"backup source {name} has not type source")
             return False
         return True
 
@@ -316,7 +295,7 @@ class Config:
         """
         precondition(cls.check_item(name))
         precondition(cls._status > 0)
-        return cls._raw_config[name]["type"] == "destination"
+        return cls._backup[name]["type"] == "destination"
 
     @classmethod
     def list_name(cls, uuid: List[str]) -> List[str]:
@@ -329,8 +308,8 @@ class Config:
         """
         precondition(cls._status > 0)
         return [name
-                for name in cls._raw_config.keys()
-                if cls._raw_config[name]["uuid"] in uuid]
+                for name in cls._backup.keys()
+                if cls._backup[name]["uuid"] in uuid]
 
     @classmethod
     def get_source(cls, destination: str) -> str:
@@ -341,8 +320,8 @@ class Config:
         """
         precondition(cls.check_destination(destination))
         precondition(cls._status > 0)
-        subvolume = cls._raw_config[destination]["subvolume"]
-        for key, value in cls._raw_config.items():
+        subvolume = cls._backup[destination]["subvolume"]
+        for key, value in cls._backup.items():
             if value["subvolume"] == subvolume and value["type"] == "source":
                 return key
         return ""
@@ -356,7 +335,7 @@ class Config:
         """
         precondition(cls.check_item(name))
         precondition(cls._status > 0)
-        return cls._raw_config[name]["subvolume"]
+        return cls._backup[name]["subvolume"]
 
     @classmethod
     def get_uuid(cls, name: str) -> str:
@@ -367,7 +346,7 @@ class Config:
         """
         precondition(cls.check_item(name))
         precondition(cls._status > 0)
-        return cls._raw_config[name]["uuid"]
+        return cls._backup[name]["uuid"]
 
     @classmethod
     def set_last_snapshot(cls, name: str, date: str) -> None:
@@ -379,12 +358,12 @@ class Config:
         precondition(cls.check_item(name))
         precondition(not_empty_str(date))
         precondition(cls._status > 0)
-        if "last-snapshot" in cls._raw_config[name].keys():
-            old_value = cls._raw_config[name]["last-snapshot"]
+        if "last-snapshot" in cls._backup[name].keys():
+            old_value = cls._backup[name]["last-snapshot"]
         else:
             old_value = None
         if old_value != date:
-            cls._raw_config[name]["last-snapshot"] = date
+            cls._backup[name]["last-snapshot"] = date
             cls._status = 2
 
     @classmethod
@@ -395,19 +374,27 @@ class Config:
         :return: The loaded configuration.
         """
         precondition(file.readable())
-        Logging.info(f"load configuration {file.name}")
+        logging.info(f"load configuration {file.name}")
         if cls._status == 1:
-            Logging.info("Reload configuration")
+            logging.info("Reload configuration")
         if cls._status == 2:
-            Logging.warning("Reload configuration, revert changes")
+            logging.warning("Reload configuration, revert changes")
         # Reset the status
         cls._status = 0
         try:
-            cls._raw_config = json.load(file)
+            cls._raw = json.load(file)
+            if "backup" not in cls._raw:
+                error_raise("no backup entry in configuration")
+            if not isinstance(cls._raw["backup"], dict):
+                error_raise("invalid backup configuration")
+            cls._backup = cls._raw["backup"]
+            if "logging" in cls._raw:
+                logging.config.dictConfig(cls._raw["logging"])
+            else:
+                logging.warning("no logging configuration")
             cls._status = 1
         except json.JSONDecodeError as error:
-            Logging.error(f"Configuration file error {error}")
-            sys.exit(1)
+            error_raise(f"Configuration file error {error}")
 
     @classmethod
     def update(cls, file) -> None:
@@ -422,11 +409,14 @@ class Config:
                 file.seek(0)
                 file.truncate()
             else:
-                Logging.info("Reopen configuration file for write")
+                logging.info("Reopen configuration file for write")
                 file.close()
                 file = open(file.name, "wt")
-            Logging.info("write configuration file")
-            json.dump(cls._raw_config, file, indent=4, sort_keys=True)
+            logging.info("write configuration file")
+            if cls._raw["backup"] is not cls._backup:
+                cls._raw["backup"] = cls._backup
+            logging.warning("internal backup config link was fixed")
+            json.dump(cls._raw, file, indent=4, sort_keys=True)
 
 
 #########################################################################################
@@ -451,7 +441,7 @@ class BlockDeviceList:
             stdout=subprocess.PIPE)
         stdout, stderr = sub.communicate()
         if sub.returncode:
-            Logging.error_raise("lsblk failed")
+            error_raise("lsblk failed")
         return json.loads(stdout)
 
     @staticmethod
@@ -466,11 +456,11 @@ class BlockDeviceList:
         precondition(not_empty_str(uuid))
         precondition(not_empty_str(entry))
         if "blockdevices" not in lsblk.keys():
-            Logging.error_raise("lsblk json structure unknown")
+            error_raise("lsblk json structure unknown")
         for item in lsblk["blockdevices"]:
             if item["uuid"] == uuid:
                 return item[entry]
-        Logging.error_raise(f"volume {uuid} is not present")
+        error_raise(f"volume {uuid} is not present")
 
     @staticmethod
     def is_filesystem_fat(uuid: str) -> bool:
@@ -567,7 +557,7 @@ class Run:
         """
         precondition(not_empty_str(uuid))
         precondition(os.path.exists(mount_point))
-        Logging.info(f"mount {uuid}{' as readonly' if readonly else ''}")
+        logging.info(f"mount {uuid}{' as readonly' if readonly else ''}")
         options = f"noatime,nodev,lazytime"
         if readonly:
             options += ",ro"
@@ -582,7 +572,7 @@ class Run:
             ["mount"] + Run._verbose() + ["--no-mtab", "--options", options,
                                           "--target", mount_point] + source)
         if error:
-            Logging.error_raise(f"mount of {uuid} failed")
+            error_raise(f"mount of {uuid} failed")
         return
 
     @staticmethod
@@ -596,7 +586,7 @@ class Run:
         error = subprocess.call(["umount"] + Run._verbose() +
                                 ["--lazy", "--no-mtab", mount_point])
         if error:
-            Logging.error_raise(f"umount failed")
+            error_raise(f"umount failed")
         return
 
     @staticmethod
@@ -613,7 +603,7 @@ class Run:
                                  "snapshot", "-r",
                                  source, destination])
         if error or not os.path.exists(destination):
-            Logging.error_raise(f"make snapshot {source} to {destination} failed")
+            error_raise(f"make snapshot {source} to {destination} failed")
         return
 
     @staticmethod
@@ -639,7 +629,7 @@ class Run:
         sender.stdout.close()
         receiver.communicate()
         if sender.returncode or receiver.returncode or not os.path.exists(destination):
-            Logging.error_raise(f"copy snapshot {source} to {destination} failed")
+            error_raise(f"copy snapshot {source} to {destination} failed")
         return
 
     @staticmethod
@@ -668,7 +658,7 @@ class Run:
             options +
             [source + "/", destination + "/"])
         if error:
-            Logging.error_raise(f"rsync {source} to {destination} failed")
+            error_raise(f"rsync {source} to {destination} failed")
         return
 
     @staticmethod
@@ -686,9 +676,9 @@ class Run:
         try:
             os.rename(source, destination)
             if os.path.exists(source) or not os.path.exists(destination):
-                Logging.error_raise(f"rename {source} to {destination} failed")
+                error_raise(f"rename {source} to {destination} failed")
         except OSError as error:
-            Logging.error_raise(f"rename {source} to {destination} failed with {error}")
+            error_raise(f"rename {source} to {destination} failed with {error}")
         return
 
 
@@ -725,8 +715,8 @@ class MountPoints:
         precondition(not_empty_str(tempdir))
         cls._base = tempfile.mkdtemp(prefix="ubackup.", dir=tempdir)
         if not cls._base or not os.path.exists(cls._base):
-            Logging.error_raise("can not create work directory")
-        Logging.info(f"use temporary work directory {cls._base}")
+            error_raise("can not create work directory")
+        logging.info(f"use temporary work directory {cls._base}")
 
     @classmethod
     def _ensure_base(cls) -> None:
@@ -761,7 +751,7 @@ class MountPoints:
             precondition(uuid not in cls._mounts)
             mount_point = tempfile.mkdtemp(prefix="mp.", dir=cls._base)
             if not mount_point or not os.path.exists(mount_point):
-                Logging.error_raise("can not create mount directory")
+                error_raise("can not create mount directory")
             readonly = mode == "r"
             Run.mount(uuid, mount_point, readonly)
             cls._mounts[uuid] = (mount_point, readonly)
@@ -781,11 +771,11 @@ class MountPoints:
         """
         precondition(not_empty_str(uuid))
         if uuid not in cls._mounts:
-            Logging.warning(f"umount of not mounted {uuid}")
+            logging.warning(f"umount of not mounted {uuid}")
         else:
             mount_point, readonly = cls._mounts[uuid]
             if forced or not readonly:
-                Logging.info(f"umount {uuid}")
+                logging.info(f"umount {uuid}")
                 Run.umount(mount_point)
                 # rmdir removes only an empty directory, it is save to use.
                 os.rmdir(mount_point)
@@ -799,7 +789,7 @@ class MountPoints:
         Also umounts volumes current used in this script.
         Does not deferred an umount.
         """
-        Logging.info("umount all ...")
+        logging.info("umount all ...")
         while cls._mounts.keys():
             # use temporary list because umount delete in the dictionary
             for uuid in list(cls._mounts.keys()):
@@ -898,7 +888,7 @@ def make_snapshot(source: str) -> None:
     source_uuid = Config.get_uuid(source)
     # Check: volume must have a BTRFS filesystem
     if not BlockDeviceList.is_filesystem_btrfs(source_uuid):
-        Logging.error_raise(f"source volume {source} has no BTRFS")
+        error_raise(f"source volume {source} has no BTRFS")
     # Mount the source to check
     # Needs read access, write access is ok because most a snapshot follows
     mount_point = MountPoints.mount(source_uuid, "r?")
@@ -910,11 +900,11 @@ def make_snapshot(source: str) -> None:
             source_path = os.path.join(mount_point, Config.get_subvolume(source))
             snapshot_path = os.path.join(mount_point, snapshot_name)
             # Create the readonly snapshot of the BTRFS subvolume
-            Logging.info(f"create source snapshot {snapshot_name}")
+            logging.info(f"create source snapshot {snapshot_name}")
             Run.snapshot(source_path, snapshot_path)
-            Logging.info(f"source snapshot {snapshot_name} is created")
+            logging.info(f"source snapshot {snapshot_name} is created")
         else:
-            Logging.info(f"skip snapshot creation, snapshot {snapshot_name} exists")
+            logging.info(f"skip snapshot creation, snapshot {snapshot_name} exists")
     finally:
         MountPoints.umount(source_uuid)
     return
@@ -937,9 +927,9 @@ def copy_snapshot(source: str, destination: str) -> None:
     destination_uuid = Config.get_uuid(destination)
     # Check: volumes must have a BTRFS filesystem
     if not BlockDeviceList.is_filesystem_btrfs(source_uuid):
-        Logging.error_raise(f"source volume {source} has no BTRFS")
+        error_raise(f"source volume {source} has no BTRFS")
     if not BlockDeviceList.is_filesystem_btrfs(destination_uuid):
-        Logging.error_raise(f"destination volume {destination} has no BTRFS")
+        error_raise(f"destination volume {destination} has no BTRFS")
     mounted_destination = MountPoints.mount(destination_uuid, "rw")
     try:
         destination_path = os.path.join(mounted_destination, snapshot_name)
@@ -950,20 +940,20 @@ def copy_snapshot(source: str, destination: str) -> None:
             try:
                 source_path = os.path.join(mounted_source, snapshot_name)
                 if not os.path.exists(source_path):
-                    Logging.error_raise(f"missing source snapshot {snapshot_name}")
-                Logging.info(f"copy snapshot {snapshot_name}")
+                    error_raise(f"missing source snapshot {snapshot_name}")
+                logging.info(f"copy snapshot {snapshot_name}")
                 # Incremental copy is possible is a common snapshot exists
                 common = get_common_snapshot(mounted_source, mounted_destination, snapshot_name)
                 if common:
-                    Logging.info(f"copy update to {common}")
+                    logging.info(f"copy update to {common}")
                     common = os.path.join(mounted_source, common)
                     precondition(os.path.exists(common))
                 Run.copy_snapshot(source_path, mounted_destination, common)
-                Logging.info(f"snapshot {snapshot_name} is copied")
+                logging.info(f"snapshot {snapshot_name} is copied")
             finally:
                 MountPoints.umount(source_uuid)
         else:
-            Logging.info(f"skip copy snapshot, snapshot {snapshot_name} exists")
+            logging.info(f"skip copy snapshot, snapshot {snapshot_name} exists")
     finally:
         MountPoints.umount(destination_uuid)
     return
@@ -982,7 +972,7 @@ def copy_files(source: str, destination: str) -> None:
     destination_uuid = Config.get_uuid(destination)
     destination_fat = BlockDeviceList.is_filesystem_fat(destination_uuid)
     if BlockDeviceList.is_filesystem_btrfs(destination_uuid):
-        Logging.warning(f"copy files to BTRFS volume {destination}")
+        logging.warning(f"copy files to BTRFS volume {destination}")
     mounted_destination = MountPoints.mount(destination_uuid, "rw")
     try:
         destination_path = os.path.join(mounted_destination, snapshot_name)
@@ -993,22 +983,22 @@ def copy_files(source: str, destination: str) -> None:
             try:
                 source_path = os.path.join(mounted_source, snapshot_name)
                 if not os.path.exists(source_path):
-                    Logging.error_raise(f"missing source snapshot {snapshot_name}")
-                Logging.info(f"copy files from snapshot {snapshot_name}")
+                    error_raise(f"missing source snapshot {snapshot_name}")
+                logging.info(f"copy files from snapshot {snapshot_name}")
                 # Search old destination
                 old_destination_path = get_old_snapshot(mounted_destination, snapshot_name)
                 # Update files in old destination
-                Logging.info(f"rsync from {source_path} to {old_destination_path}")
+                logging.info(f"rsync from {source_path} to {old_destination_path}")
                 Run.rsync(source_path, old_destination_path, destination_fat)
                 # Rename old destination only after successful file copy
                 # If it is the first copy to a backup volume, then the old name is the current
                 if old_destination_path != destination_path:
                     Run.rename(old_destination_path, destination_path)
-                Logging.info(f"files {snapshot_name} are copied")
+                logging.info(f"files {snapshot_name} are copied")
             finally:
                 MountPoints.umount(source_uuid)
         else:
-            Logging.info(f"skip copy files, destination {snapshot_name} exists")
+            logging.info(f"skip copy files, destination {snapshot_name} exists")
     finally:
         MountPoints.umount(destination_uuid)
     return
@@ -1043,12 +1033,12 @@ def backup_to(item: str) -> None:
         source = item
         destination = None
     if Config.check_source(source):
-        Logging.info(f"snapshot {source}")
+        logging.info(f"snapshot {source}")
         make_snapshot(source)
         check_copied_files(source)
         Config.set_last_snapshot(source, BACKUP_DATE)
         if destination and Config.check_destination(destination):
-            Logging.info(f"backup from {source} to {destination}")
+            logging.info(f"backup from {source} to {destination}")
             if BlockDeviceList.is_filesystem_btrfs(Config.get_uuid(destination)):
                 # destination is also BTRFS: send the snapshot
                 copy_snapshot(source, destination)
@@ -1068,7 +1058,7 @@ def collect_all() -> List[str]:
     """
     connected = BlockDeviceList.list_uuid()
     names = Config.list_name(connected)
-    Logging.info(f"connected are: $(', '.join(names))")
+    logging.info(f"connected are: ${', '.join(names)}")
     return names
 
 
@@ -1107,23 +1097,28 @@ def main(description: str = None) -> int:
         action="store_true",
         help="Snapshot all online sources, backup to all online destinations")
     arguments = parser.parse_args()
+    # Set verbose level before loading the configuration
     Config.set_verbose(arguments.verbose)
+    # noinspection PyPep8,PyBroadException
     try:
         Config.load(arguments.conf)
+        logging.info(f"Loaded configuration, ubackup {UBACKUP_VERSION} runs")
+        # Set verbose level again to optionally overwrite the config file
+        Config.set_verbose(arguments.verbose)
         job_list = arguments.destinations if not arguments.all else collect_all()
-        Logging.info(f"creating backups with date {BACKUP_DATE}")
+        logging.info(f"creating backups with date {BACKUP_DATE}")
         if os.geteuid() != 0:
-            Logging.error_raise("Backup mounts the volumes. So it must run as root.")
+            error_raise("Backup mounts the volumes. So it must run as root.")
         if not job_list:
             if arguments.all:
-                Logging.warning("no configured volumes are online")
+                logging.warning("no configured volumes are online")
             else:
-                Logging.error_raise("no backup destinations given")
+                error_raise("no backup destinations given")
         for destination in job_list:
             if Config.check_item(destination):
                 backup_to(destination)
             else:
-                Logging.error(f"invalid backup destination {destination}")
+                logging.error(f"invalid backup destination {destination}")
         # The last snapshots are stored in the configuration file.
         Config.update(arguments.conf)
         # TODO: thin away old backups/snapshots on all in job_list and all referenced sources
@@ -1131,6 +1126,8 @@ def main(description: str = None) -> int:
         result = 0
     except RuntimeError as error:
         print(f"ABORT ON ERROR: {error}")
+    except:
+        logging.exception("unhandled exception")
     finally:
         # Clean up
         MountPoints.umount_all()

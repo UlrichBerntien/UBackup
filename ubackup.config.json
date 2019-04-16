@@ -1,44 +1,71 @@
 {
-    "tst-backup-btrfs": {
-        "comment": "Test backup volume, btrfs partition",
-        "last-snapshot": "2019-04-07",
-        "subvolume": "@Testdata",
-        "type": "destination",
-        "uuid": "79128545-fd0b-4949-a2f0-3625a4ebe00e"
+    "backup": {
+        "backup-A-btrfs": {
+            "comment": "External disk A, btrfs partition",
+            "last-snapshot": "2019-04-11",
+            "subvolume": "@Data",
+            "type": "destination",
+            "uuid": "a3379c7c-b2d1-4081-9c0c-28c747f38177"
+        },
+        "backup-A-fat": {
+            "comment": "External disk A, exfat partition",
+            "last-snapshot": "2019-04-11",
+            "subvolume": "@Data",
+            "type": "destination",
+            "uuid": "C84C-B68C"
+        },
+        "backup-B-btrfs": {
+            "comment": "External disk B, btrfs partition",
+            "last-snapshot": "2019-04-16",
+            "subvolume": "@Data",
+            "type": "destination",
+            "uuid": "77f98c13-2b73-4312-ade5-0edfed195407"
+        },
+        "backup-B-fat": {
+            "comment": "External disk B, exfat partition",
+            "last-snapshot": "2019-04-16",
+            "subvolume": "@Data",
+            "type": "destination",
+            "uuid": "35BA-05AC"
+        },
+        "data": {
+            "comment": "Laptop internal disk",
+            "last-snapshot": "2019-04-16",
+            "subvolume": "@Data",
+            "type": "source",
+            "uuid": "482b0d11-8b94-4450-be72-c8f64fab7d91"
+        }
     },
-    "tst-backup-fat": {
-        "comment": "Test backup volume, exfat partition",
-        "last-snapshot": "2019-04-07",
-        "subvolume": "@Testdata",
-        "type": "destination",
-        "uuid": "231C-120A"
-    },
-    "tst-data": {
-        "comment": "Test data source",
-        "last-snapshot": "2019-04-07",
-        "subvolume": "@Testdata",
-        "type": "source",
-        "uuid": "600ce7b9-c37f-40b4-a393-ebd3dec18d7f"
-    },
-    "data": {
-        "comment": "Data drive in laptop",
-        "last-snapshot": null,
-        "subvolume": "@Data",
-        "type": "source",
-        "uuid": "482b0d11-8b94-4450-be72-c8f64fab7d91"
-    },
-    "backup-A-btrfs": {
-        "comment": "External drive A, btrfs partition",
-        "last-snapshot": null,
-        "subvolume": "@Data",
-        "type": "destination",
-        "uuid": "a3379c7c-b2d1-4081-9c0c-28c747f38177"
-    },
-    "backup-A-fat": {
-        "comment": "External drive A, exfat partition",
-        "last-snapshot": null,
-        "subvolume": "@Data",
-        "type": "destination",
-        "uuid": "C84C-B68C"
+    "logging": {
+        "formatters": {
+            "detailed": {
+                "()": "ext://ubackup.UTCFormatter",
+                "datefmt": "%Y-%m-%d %H:%M",
+                "format": "%(asctime)s %(levelname)-8s %(message)s"
+            }
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "level": "ERROR"
+            },
+            "file": {
+                "backupCount": 2,
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": "/var/log/ubackup.log",
+                "formatter": "detailed",
+                "level": "INFO",
+                "maxBytes": 524000,
+                "mode": "a"
+            }
+        },
+        "root": {
+            "handlers": [
+                "console",
+                "file"
+            ],
+            "level": "INFO"
+        },
+        "version": 1
     }
 }
