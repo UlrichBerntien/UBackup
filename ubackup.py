@@ -20,8 +20,16 @@ To BTRFS volumes a send - receive of snapshots is done.
 To other volumes a rsync is done. To FAT volumes the simple "--archive" flag
 is not used because user information could not stored on FAT volumes. To all
 other filesystems a "rsync --archive" call is used. To FAT volumes a time
-tolerance of 3700s (approx. 1h) is used to prevent a copy of all files after
+tolerance of 3700s (= 1h + 100s) is used to prevent a copy of all files after
 DST change because FAT uses the local time.
+Attention: Files changed only maximal 1 hour after backup will be not copied
+to a FAT backup volume. The old file content will be remain. I decide a one
+hour old copy of such a very rarely changed file is acceptable.
+
+Each snapshot or rsync copied subvolume is checked by comparing some test
+files. If the content of the test files are not equal, then an error message
+will be logged. The backup process will be continued also if invalid backup
+files are found.
 
 The program return code is 0 on success and 1 on a non recoverable error.
 
@@ -48,7 +56,7 @@ The dictionary is passed throw the Python logging.config.dictConfig function.
 A -v or -vv switch overwrites the logging levels set in the config file.
 """
 
-#########################################################################################
+###############################################################################
 #
 # Author: Ulrich Berntien
 # Date: 2019-03-26
@@ -57,11 +65,12 @@ A -v or -vv switch overwrites the logging levels set in the config file.
 # MIT License
 # Copyright (c) 2019 Ulrich Berntien
 #
-#########################################################################################
+###############################################################################
 
 
 import argparse
 import datetime
+import filecmp
 import glob
 import json
 import logging
@@ -73,10 +82,10 @@ import tempfile
 import time
 from typing import *
 
-#########################################################################################
+###############################################################################
 
 # Version
-UBACKUP_VERSION = "2019-04-16"
+BACKUP_VERSION = "2019-05-06"
 
 # Default configuration file name.
 # Default location is beside the script.
@@ -89,6 +98,9 @@ CONFIG_FILE = "ubackup.config.json"
 # is added to the backup date stamp.
 BACKUP_DATE = datetime.date.today().isoformat()
 
+# Number of files to compare after a snapshot or a copy.
+CHECK_FILE_COUNT = 30
+
 # The name part of all snapshot subvolumes.
 SNAPSHOT_NAME_MIDDLE = "-Snapshot-"
 
@@ -97,7 +109,7 @@ SNAPSHOT_NAME_MIDDLE = "-Snapshot-"
 SNAPSHOT_NAME_APPENDIX = SNAPSHOT_NAME_MIDDLE + BACKUP_DATE
 
 
-#########################################################################################
+###############################################################################
 
 
 def precondition(condition: bool) -> None:
@@ -105,9 +117,9 @@ def precondition(condition: bool) -> None:
     Raises a exception on condition is false.
     Bugs in a backup program are fatal. Hence not the assert is used but this
     strict exception throwing function is used.
-    If a condition is False, then a program bug must exists causing this failure.
-    Only program errors are handled by the precondition calls. Configuration errors,
-    user errors, etc. are handled soft.
+    If a condition is False, then a program bug must exists causing this
+    failure. Only program errors are handled by the precondition calls.
+    Configuration errors, user errors, etc. are handled soft.
     :param condition: True if the program works correct.
     """
     if not condition:
@@ -132,7 +144,7 @@ def error_raise(message: str) -> None:
     raise RuntimeError(message)
 
 
-#########################################################################################
+###############################################################################
 
 
 class UTCFormatter(logging.Formatter):
@@ -144,7 +156,7 @@ class UTCFormatter(logging.Formatter):
     converter = time.gmtime
 
 
-#########################################################################################
+###############################################################################
 
 
 class Config:
@@ -419,7 +431,7 @@ class Config:
             json.dump(cls._raw, file, indent=4, sort_keys=True)
 
 
-#########################################################################################
+###############################################################################
 
 
 class BlockDeviceList:
@@ -516,7 +528,7 @@ class BlockDeviceList:
         return [x["uuid"] for x in devices["blockdevices"] if "uuid" in x and x["uuid"]]
 
 
-#########################################################################################
+###############################################################################
 
 
 class Run:
@@ -576,6 +588,18 @@ class Run:
         return
 
     @staticmethod
+    def sync() -> None:
+        """
+        Synchronize caches with the storage devices.
+        The sync could be take a while after backup or remove operations
+        with a lot of involved files.
+        """
+        error = subprocess.call(["sync"])
+        if error:
+            error_raise("sync failed")
+        return
+
+    @staticmethod
     def umount(mount_point: str) -> None:
         """
         Unmount a file system.
@@ -586,7 +610,7 @@ class Run:
         error = subprocess.call(["umount"] + Run._verbose() +
                                 ["--lazy", "--no-mtab", mount_point])
         if error:
-            error_raise(f"umount failed")
+            error_raise("umount failed")
         return
 
     @staticmethod
@@ -682,7 +706,7 @@ class Run:
         return
 
 
-#########################################################################################
+###############################################################################
 
 
 class MountPoints:
@@ -733,7 +757,9 @@ class MountPoints:
         """
         Mounts a volume.
         :param uuid: UUID of the volume to mount.
-        :param mode: "r" Readonly mount, "rw" read-write mount, "r?" read or read-write mount.
+        :param mode: "r" Readonly mount,
+                     "rw" read-write mount,
+                     "r?" read or read-write mount.
         :return: absolute path to the mount point.
         """
         precondition(not_empty_str(uuid))
@@ -765,11 +791,14 @@ class MountPoints:
         Umounts a read-write mounted volume direct.
         An umount of a read-only mounted volume can be deferred if not forced.
         An umount of a not mounted backup volume is ignored.
+        A sync will be always executed also if the umount is deferred.
         :param uuid: UUID of the volume to mount.
         :param forced: If true, then the volume is direct umounted also if it
             is only read-only mounted.
         """
         precondition(not_empty_str(uuid))
+        logging.info("running sync")
+        Run.sync()
         if uuid not in cls._mounts:
             logging.warning(f"umount of not mounted {uuid}")
         else:
@@ -801,7 +830,7 @@ class MountPoints:
         return
 
 
-#########################################################################################
+###############################################################################
 
 
 def make_snapshot_name(source: str) -> str:
@@ -819,7 +848,8 @@ def list_snapshots(path: str, snapshot_name: str) -> List[str]:
     Lists all snapshots with other date stamps.
     :param path: Search the snapshots in this path.
     :param snapshot_name: The name of the snapshot as pattern base.
-    :return: List of snapshots path names. List could be empty but it will be a list.
+    :return: List of snapshots path names.
+             List could be empty but it will be a list.
     """
     precondition(os.path.exists(path))
     precondition(not_empty_str(snapshot_name))
@@ -1004,6 +1034,84 @@ def copy_files(source: str, destination: str) -> None:
     return
 
 
+def sample_test_files(source_path: str, filter_date: datetime) -> List[str]:
+    """
+    Samples test files from the source path to check the copy.
+    The number of test files is defined in CHECK_FILE_COUNT.
+    :param source_path: Samples files from this directory tree.
+    :param filter_date: Files must not be changed after this date.
+    :return: List of files (full path names) to compare.
+    """
+
+    def samples(path: str, level: int, count: int) -> List[str]:
+        """
+        Samples test files from the path.
+        :param path: Samples files friom this directory tree
+        :param level: Go maximal this number of levels deep into the dir tree.
+        :param count: Maximal number of files to sample.
+        :return: List of files (full path names).
+        """
+        precondition(os.path.exists(path))
+        precondition(level >= 0)
+        result_list = []
+        try:
+            if level > 0 and count > 3:
+                dir_list = []
+                with os.scandir(path) as directory:
+                    for entry in directory:
+                        if entry.is_dir(follow_symlinks=False):
+                            dir_list.append((entry.stat().st_mtime, entry.path))
+                dir_list.sort()
+                # List files from current changed directories first
+                for i in range(len(dir_list) - 1, 0, -1):
+                    result_list.extend(samples(dir_list[i][1], level - 1, count - len(result_list)))
+            if len(result_list) < count:
+                file_list = []
+                with os.scandir(path) as directory:
+                    for entry in directory:
+                        if entry.is_file(follow_symlinks=False):
+                            m = entry.stat().st_mtime
+                            if not filter_date or datetime.datetime.fromtimestamp(m) < filter_date:
+                                file_list.append((m, entry.path))
+                # Take the 3 most current files from each directory
+                file_list.sort()
+                for i in range(len(file_list) - 1, max(0, len(file_list) - 4), -1):
+                    result_list.append(file_list[i][1])
+        except PermissionError:
+            # ignore missing access rights
+            pass
+        except Exception as error:
+            # log error and continue
+            # Continue because this is only a check. It is better to continue the backup and
+            # log the error then to stop the backup on an error during file checking.
+            logging.error(f"unhandled exception during file check: {error}")
+        return result_list
+
+    precondition(os.path.exists(source_path))
+    precondition(CHECK_FILE_COUNT > 0)
+    return samples(source_path, 10, CHECK_FILE_COUNT)
+
+
+def compare_files(file_list: List[Tuple[str, str]]) -> None:
+    """
+    Compares the content of the file pairs.
+    Writes errors to the log if the file pairs are not equal.
+    :param file_list: List of file name pairs.
+    """
+    files_ok = 0
+    files_bad = 0
+    for file_a, file_b in file_list:
+        if filecmp.cmp(file_a, file_b, shallow=False):
+            files_ok += 1
+        else:
+            files_bad += 1
+            logging.error(f"differing backup file found: '{file_a}' <> '{file_b}'")
+    logging.info(f"backup files compared: {files_ok} are ok, {files_bad} are different")
+    if files_bad > 0:
+        # log the import number of different backup files also as error message
+        logging.error(f"found {files_bad} differing backup files")
+
+
 def check_copied_files(source: str, destination: str = None) -> None:
     """
     Check the files copied to the destination.
@@ -1013,9 +1121,48 @@ def check_copied_files(source: str, destination: str = None) -> None:
         Or None if a snapshot on the source value should be checked.
     """
     precondition(Config.check_source(source))
-    if destination is not None:
-        precondition(Config.check_destination(destination))
-    # TODO, implement the function
+    source_mount_point = None
+    destination_mount_point = None
+    try:
+        # source is always given by the function parameter:
+        source_uuid = Config.get_uuid(source)
+        snapshot_name = make_snapshot_name(source)
+        source_mount_point = MountPoints.mount(source_uuid, "r")
+        # destination could be given by the function parameter or could be
+        # implicit given:
+        if destination:
+            # compare: snapshot of the source - backup of the snapshot
+            precondition(Config.check_destination(destination))
+            # mount the destination volume
+            destination_uuid = Config.get_uuid(destination)
+            destination_mount_point = MountPoints.mount(destination_uuid, "r")
+            # destination and source are snapshots with the same name
+            destination_path = os.path.join(destination_mount_point, snapshot_name)
+            source_path = os.path.join(source_mount_point, snapshot_name)
+            # The both snapshots must be unchanged, so no time filter is needed
+            filter_date = None
+        else:
+            # compare: source data - snapshot of the source data
+            # Both are on the source volume. So both are mounted before.
+            destination_path = os.path.join(source_mount_point, snapshot_name)
+            source_path = os.path.join(source_mount_point, Config.get_subvolume(source))
+            # The source could be changed after the snapshot creation.
+            # So compare only files unchanged at the day of the snapshot.
+            filter_date = datetime.datetime.strptime(BACKUP_DATE, "%Y-%M-%d") - \
+                          datetime.timedelta(days=1)
+        # Collect a list of files for the compare. Only a small subset of the
+        # files will be compared.
+        source_file_list = sample_test_files(source_path, filter_date)
+        logging.info(f"compare {len(source_file_list)} files to check the backup")
+        compare_files(
+            [(name, name.replace(source_path, destination_path, 1)) for name in source_file_list])
+        logging.info("all files compared")
+    finally:
+        if source_mount_point:
+            MountPoints.umount(source_uuid)
+        if destination_mount_point:
+            MountPoints.umount(destination_uuid)
+    return
 
 
 def backup_to(item: str) -> None:
@@ -1102,7 +1249,7 @@ def main(description: str = None) -> int:
     # noinspection PyPep8,PyBroadException
     try:
         Config.load(arguments.conf)
-        logging.info(f"Loaded configuration, ubackup {UBACKUP_VERSION} runs")
+        logging.info(f"Loaded configuration, ubackup {BACKUP_VERSION} runs")
         # Set verbose level again to optionally overwrite the config file
         Config.set_verbose(arguments.verbose)
         job_list = arguments.destinations if not arguments.all else collect_all()
@@ -1125,7 +1272,7 @@ def main(description: str = None) -> int:
         # program end without errors:
         result = 0
     except RuntimeError as error:
-        print(f"ABORT ON ERROR: {error}")
+        logging.exception(f"ABORT ON ERROR: {error}")
     except:
         logging.exception("unhandled exception")
     finally:

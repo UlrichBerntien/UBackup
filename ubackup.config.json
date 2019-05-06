@@ -52,7 +52,7 @@
             "file": {
                 "backupCount": 2,
                 "class": "logging.handlers.RotatingFileHandler",
-                "filename": "/var/log/ubackup.log",
+                "filename": "/tmp/ubackup.log",
                 "formatter": "detailed",
                 "level": "INFO",
                 "maxBytes": 524000,
