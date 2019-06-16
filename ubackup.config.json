@@ -2,20 +2,30 @@
     "backup": {
         "backup-A-btrfs": {
             "comment": "External disk A, btrfs partition",
-            "last-snapshot": "2019-04-11",
+            "keep": {
+                "day": 3,
+                "month": 3,
+                "year": 6
+            },
+            "last-snapshot": "2019-06-02",
             "subvolume": "@Data",
             "type": "destination",
             "uuid": "a3379c7c-b2d1-4081-9c0c-28c747f38177"
         },
         "backup-A-fat": {
             "comment": "External disk A, exfat partition",
-            "last-snapshot": "2019-04-11",
+            "last-snapshot": "2019-06-02",
             "subvolume": "@Data",
             "type": "destination",
             "uuid": "C84C-B68C"
         },
         "backup-B-btrfs": {
             "comment": "External disk B, btrfs partition",
+            "keep": {
+                "day": 3,
+                "month": 6,
+                "year": 6
+            },
             "last-snapshot": "2019-04-16",
             "subvolume": "@Data",
             "type": "destination",
@@ -30,7 +40,12 @@
         },
         "data": {
             "comment": "Laptop internal disk",
-            "last-snapshot": "2019-04-16",
+            "keep": {
+                "day": 3,
+                "month": 0,
+                "year": 0
+            },
+            "last-snapshot": "2019-06-16",
             "subvolume": "@Data",
             "type": "source",
             "uuid": "482b0d11-8b94-4450-be72-c8f64fab7d91"
@@ -52,7 +67,7 @@
             "file": {
                 "backupCount": 2,
                 "class": "logging.handlers.RotatingFileHandler",
-                "filename": "/tmp/ubackup.log",
+                "filename": "/var/log/ubackup.log",
                 "formatter": "detailed",
                 "level": "INFO",
                 "maxBytes": 524000,

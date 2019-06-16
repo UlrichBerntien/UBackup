@@ -11,9 +11,9 @@ filesystem. A history of old snapshots is stored on BTRFS volumes only.
 The snapshots will be named "NAME-Snapshot-YYYY-MM-DD" where NAME is the name
 of the subvolume, e.g. @Data, and YYYY-MM-DD is the creation date.
 
-On the source volume each backup starts with a snapshot. Only one snapshot per
-day will be created. A second call of the script at the same day will reuse the
-existing snapshot on the source volume.
+On the source volume each backup starts with a snapshot creation. But only one
+snapshot per day will be created. A second call of the script at the same day
+will reuse the existing snapshot on the source volume.
 
 To BTRFS volumes a send - receive of snapshots is done.
 
@@ -31,6 +31,14 @@ files. If the content of the test files are not equal, then an error message
 will be logged. The backup process will be continued also if invalid backup
 files are found.
 
+On BTRFS volumes the number of old backups is defined by the parameter keep
+in the configuration. The last n backups, the last backup of the last n month
+and the last backup of the last n years will be stored. Other older backups
+will be deleted.
+
+On other volumes the number of backups is constant. A new bachup will replace
+the oldes backup on the volume.
+
 The program return code is 0 on success and 1 on a non recoverable error.
 
 The default configuration is ubackup.conf.json located  beside the script file,
@@ -43,12 +51,20 @@ The top level element in the configuration is a dictionary with the two keys
 backup and logging.
 
 The configuration of the subvolumes to backup is in a dictionary with the key
-backup. In this sub dictipnary the key is the name of the volume, the
+backup. In this sub dictionary the key is the name of the volume, the
 value is a dictionary with details to the volume. The details are:
-- subvolume: Name of the subvolume. Name without "-Snapshot-YYYY-MM-DD".
+- subvolume: Name of the BTRFS subvolume. For backups: the name without
+  "-Snapshot-YYYY-MM-DD". This extension is added internal by the script.
+  For not-BTRFS volumes: a directory in the root is used like a subvolume.
 - uuid: UUID of the volume used to mount the volume.
 - type: "source" or "destination".
 - last-snapshot: null or the date of the last stored snapshot.
+- keep: A dictionary with three entries: day, month and year. The number of
+  old backups to keep on the volume. day: the latest n backups are kept.
+  month: the latest backup per month of the last n month is kept. year: the
+  latest backup per year of the last n years are kept. (The simplifications
+  30 days = 1 month and 365 days = 1 year are used.)
+  The keep entry is used on BTFS volumes only.
 - comment: Comment text to the subvolume.
 
 The configuration of the logging is a dictionary with the key logging.
@@ -59,7 +75,7 @@ A -v or -vv switch overwrites the logging levels set in the config file.
 ###############################################################################
 #
 # Author: Ulrich Berntien
-# Date: 2019-03-26
+# Initial date: 2019-03-26
 # Language: Python 3.6.7
 #
 # MIT License
@@ -85,7 +101,7 @@ from typing import *
 ###############################################################################
 
 # Version
-BACKUP_VERSION = "2019-05-06"
+BACKUP_VERSION = "2019-06-16"
 
 # Default configuration file name.
 # Default location is beside the script.
@@ -249,6 +265,18 @@ class Config:
         if "subvolume" not in cfg:
             logging.error(f"item {name} contains no subvolume name")
             return False
+        if "keep" in cfg:
+            # The keep item is only needed for BTRFS volumes and a default
+            # value exists. So the keep item is optional. If the item exists
+            # the values must be correct.
+            keep = cfg["keep"]
+            for part, lowest in (("day", 1), ("month", 0), ("year", 0)):
+                if part not in keep:
+                    logging.error(f"item {name} contains no '{part}' value in the 'keep' item")
+                    return False
+                if not isinstance(keep[part], int) or keep[part] < lowest:
+                    logging.error(f"item {name} 'keep.{part}' value is no integer or less than {lowest}")
+                    return False
         return True
 
     @classmethod
@@ -306,13 +334,12 @@ class Config:
         :return: True if and only if the item has type destination.
         """
         precondition(cls.check_item(name))
-        precondition(cls._status > 0)
         return cls._backup[name]["type"] == "destination"
 
     @classmethod
     def list_name(cls, uuid: List[str]) -> List[str]:
         """
-        List the names of all subvolumes on volumes with the given uuid.
+        Lists the names of all subvolumes on volumes with the given uuid.
         Destination and source subvolumes will be included in the list.
         The returned list could be empty.
         :param uuid: list of UUIDs
@@ -324,6 +351,18 @@ class Config:
                 if cls._backup[name]["uuid"] in uuid]
 
     @classmethod
+    def list_last_snapshots(cls, subvolume: str) -> List[str]:
+        """
+        Lists the last snapshot dates of all backups for one subvolume.
+        :param subvolume: The name of the subvolume.
+        :return: List of the last snapshot dates. The dates are stored as str.
+        """
+        precondition(cls._status > 0)
+        return [cls._backup[name]["last-snapshot"]
+                for name in cls._backup.keys()
+                if cls._backup[name]["subvolume"] == subvolume]
+
+    @classmethod
     def get_source(cls, destination: str) -> str:
         """
         Gets the name of the backup source volume.
@@ -331,7 +370,6 @@ class Config:
         :return: Name of the source volume.
         """
         precondition(cls.check_destination(destination))
-        precondition(cls._status > 0)
         subvolume = cls._backup[destination]["subvolume"]
         for key, value in cls._backup.items():
             if value["subvolume"] == subvolume and value["type"] == "source":
@@ -346,7 +384,6 @@ class Config:
         :return: The uuid.
         """
         precondition(cls.check_item(name))
-        precondition(cls._status > 0)
         return cls._backup[name]["subvolume"]
 
     @classmethod
@@ -357,8 +394,22 @@ class Config:
         :return: The uuid.
         """
         precondition(cls.check_item(name))
-        precondition(cls._status > 0)
         return cls._backup[name]["uuid"]
+
+    @classmethod
+    def get_keep(cls, name: str) -> Dict:
+        """
+        Gets the number backups/snapshots to keep on the volume.
+        :param name: The name of the source or destination volume.
+        :return: The numbers to keep with time distance of a day, month and year.
+        """
+        precondition(cls.check_item(name))
+        item: Dict = cls._backup[name]
+        if "keep" in item.keys():
+            return item["keep"]
+        else:
+            # The default number of snapshots/backups to keep
+            return {"day": 7, "month": 6, "year": 5}
 
     @classmethod
     def set_last_snapshot(cls, name: str, date: str) -> None:
@@ -369,7 +420,6 @@ class Config:
         """
         precondition(cls.check_item(name))
         precondition(not_empty_str(date))
-        precondition(cls._status > 0)
         if "last-snapshot" in cls._backup[name].keys():
             old_value = cls._backup[name]["last-snapshot"]
         else:
@@ -475,7 +525,7 @@ class BlockDeviceList:
         error_raise(f"volume {uuid} is not present")
 
     @staticmethod
-    def is_filesystem_fat(uuid: str) -> bool:
+    def is_fat(uuid: str) -> bool:
         """
         Check if the volume has a FAT file system.
         :param uuid: The uuid of the volume.
@@ -486,7 +536,7 @@ class BlockDeviceList:
         return BlockDeviceList._get(info, uuid, "fstype") in ("exfat", "msdos", "vfat")
 
     @staticmethod
-    def is_filesystem_btrfs(uuid: str) -> bool:
+    def is_btrfs(uuid: str) -> bool:
         """
         Checks if the volume has a BTRFS file system.
         :param uuid: The uuid of the volume.
@@ -574,7 +624,7 @@ class Run:
         if readonly:
             options += ",ro"
         current_mount_point = BlockDeviceList.mount_point(uuid)
-        is_btrfs = BlockDeviceList.is_filesystem_btrfs(uuid)
+        is_btrfs = BlockDeviceList.is_btrfs(uuid)
         if current_mount_point and not is_btrfs:
             options += ",bind"
             source = ["--bind", current_mount_point]
@@ -633,7 +683,7 @@ class Run:
     @staticmethod
     def copy_snapshot(source: str, destination: str, common_snapshot) -> None:
         """
-        Copy snapshot from BTRFS volume to other BTRFS volume.
+        Copies snapshot from BTRFS volume to other BTRFS volume.
         Uses incremental update if a common snapshot exists.
         On an error: logs an error message and raises a Runtime exception.
         :param source: Path to snapshot to copy.
@@ -654,6 +704,20 @@ class Run:
         receiver.communicate()
         if sender.returncode or receiver.returncode or not os.path.exists(destination):
             error_raise(f"copy snapshot {source} to {destination} failed")
+        return
+
+    @staticmethod
+    def delete_snapshot(path: str) -> None:
+        """
+        Deletes snapshot from BTRFS volume.
+        :param path: Path to the snapshot to delete.
+        """
+        precondition(path.find(SNAPSHOT_NAME_MIDDLE) > 0)
+        precondition(os.path.basename(path).find(SNAPSHOT_NAME_MIDDLE) > 0)
+        error = subprocess.call(
+            ["btrfs", "subvolume", "delete"] + Run._verbose() + [path])
+        if error:
+            error_raise(f"btrfs subvolume delete {path} failed")
         return
 
     @staticmethod
@@ -770,6 +834,7 @@ class MountPoints:
             if (mode == "r" and not readonly) or (mode == "rw" and readonly):
                 # mount mode does not match, needs a remount
                 cls.umount(uuid, forced=True)
+                mount_point = ""
             else:
                 # short cut: use the existing mount
                 pass
@@ -809,6 +874,7 @@ class MountPoints:
                 # rmdir removes only an empty directory, it is save to use.
                 os.rmdir(mount_point)
                 del cls._mounts[uuid]
+                precondition(uuid not in cls._mounts)
         return
 
     @classmethod
@@ -833,19 +899,19 @@ class MountPoints:
 ###############################################################################
 
 
-def make_snapshot_name(source: str) -> str:
+def make_snapshot_name(item: str) -> str:
     """
-    Builds name of the current snapshot from the source volume name.
-    :param source: Source volume name.
+    Builds name of the current snapshot from the volume name.
+    :param item: Volume name.
     :return: Snapshot name
     """
-    precondition(Config.check_source(source))
-    return Config.get_subvolume(source) + SNAPSHOT_NAME_APPENDIX
+    precondition(Config.check_item(item))
+    return Config.get_subvolume(item) + SNAPSHOT_NAME_APPENDIX
 
 
 def list_snapshots(path: str, snapshot_name: str) -> List[str]:
     """
-    Lists all snapshots with other date stamps.
+    Lists all snapshots of the same volume.
     :param path: Search the snapshots in this path.
     :param snapshot_name: The name of the snapshot as pattern base.
     :return: List of snapshots path names.
@@ -858,9 +924,26 @@ def list_snapshots(path: str, snapshot_name: str) -> List[str]:
     return lst if lst is not None else list()
 
 
+def add_snapshot_date(path_list: List[str]) -> List[Tuple[str, datetime.datetime]]:
+    """
+    Adds to a list of snapshot/backup paths the datetime.
+    Accepts a list of path with a file names of volume snapshots. So the last
+    10 characters must be a date. This date will be parsed.
+    :param path_list: List of snapshot path names.
+    :return: List of tuples (path,date).
+    """
+    path_date_list: List[Tuple[str, datetime.datetime]] = []
+    for path in path_list:
+        try:
+            path_date_list.append((path, datetime.datetime.strptime(path[-10:], "%Y-%m-%d")))
+        except ValueError:
+            logging.error("ignore file looks like snapshot '{path}'")
+    return path_date_list
+
+
 def get_common_snapshot(path1: str, path2: str, snapshot_name: str) -> str:
     """
-    Get a common snapshot in both paths.
+    Get a common snapshot of the volume in both paths.
     If more than one snapshot is in both path, returns the newest snapshot.
     :param path1: Search in this path.
     :param path2: Snapshot must also exists in this path.
@@ -917,7 +1000,7 @@ def make_snapshot(source: str) -> None:
     snapshot_name = make_snapshot_name(source)
     source_uuid = Config.get_uuid(source)
     # Check: volume must have a BTRFS filesystem
-    if not BlockDeviceList.is_filesystem_btrfs(source_uuid):
+    if not BlockDeviceList.is_btrfs(source_uuid):
         error_raise(f"source volume {source} has no BTRFS")
     # Mount the source to check
     # Needs read access, write access is ok because most a snapshot follows
@@ -956,9 +1039,9 @@ def copy_snapshot(source: str, destination: str) -> None:
     source_uuid = Config.get_uuid(source)
     destination_uuid = Config.get_uuid(destination)
     # Check: volumes must have a BTRFS filesystem
-    if not BlockDeviceList.is_filesystem_btrfs(source_uuid):
+    if not BlockDeviceList.is_btrfs(source_uuid):
         error_raise(f"source volume {source} has no BTRFS")
-    if not BlockDeviceList.is_filesystem_btrfs(destination_uuid):
+    if not BlockDeviceList.is_btrfs(destination_uuid):
         error_raise(f"destination volume {destination} has no BTRFS")
     mounted_destination = MountPoints.mount(destination_uuid, "rw")
     try:
@@ -1000,8 +1083,8 @@ def copy_files(source: str, destination: str) -> None:
     snapshot_name = make_snapshot_name(source)
     source_uuid = Config.get_uuid(source)
     destination_uuid = Config.get_uuid(destination)
-    destination_fat = BlockDeviceList.is_filesystem_fat(destination_uuid)
-    if BlockDeviceList.is_filesystem_btrfs(destination_uuid):
+    destination_fat = BlockDeviceList.is_fat(destination_uuid)
+    if BlockDeviceList.is_btrfs(destination_uuid):
         logging.warning(f"copy files to BTRFS volume {destination}")
     mounted_destination = MountPoints.mount(destination_uuid, "rw")
     try:
@@ -1046,7 +1129,7 @@ def sample_test_files(source_path: str, filter_date: datetime) -> List[str]:
     def samples(path: str, level: int, count: int) -> List[str]:
         """
         Samples test files from the path.
-        :param path: Samples files friom this directory tree
+        :param path: Samples files from this directory tree
         :param level: Go maximal this number of levels deep into the dir tree.
         :param count: Maximal number of files to sample.
         :return: List of files (full path names).
@@ -1167,7 +1250,7 @@ def check_copied_files(source: str, destination: str = None) -> None:
 
 def backup_to(item: str) -> None:
     """
-    Create a backup or snapshot on the given item.
+    Creates a backup or snapshot on the given item.
     :param item: Name of the backup volume to use.
     """
     precondition(Config.check_item(item))
@@ -1186,7 +1269,7 @@ def backup_to(item: str) -> None:
         Config.set_last_snapshot(source, BACKUP_DATE)
         if destination and Config.check_destination(destination):
             logging.info(f"backup from {source} to {destination}")
-            if BlockDeviceList.is_filesystem_btrfs(Config.get_uuid(destination)):
+            if BlockDeviceList.is_btrfs(Config.get_uuid(destination)):
                 # destination is also BTRFS: send the snapshot
                 copy_snapshot(source, destination)
             else:
@@ -1194,6 +1277,67 @@ def backup_to(item: str) -> None:
                 copy_files(source, destination)
             check_copied_files(source, destination)
             Config.set_last_snapshot(destination, BACKUP_DATE)
+    return
+
+
+def thin_away(item: str) -> None:
+    """
+    Thins away old backups/snapshots.
+    This function works on BTRFS volumes only.
+    :param item: Name of the backup volume to use.
+    """
+    precondition(Config.check_item(item))
+    uuid = Config.get_uuid(item)
+    precondition(BlockDeviceList.is_btrfs(uuid))
+    path = MountPoints.mount(uuid, "rw")
+    keep = Config.get_keep(item)
+    try:
+        # create sorted list of backups/snapshots of the volume.
+        to_analyse = list_snapshots(path, make_snapshot_name(item))
+        number_backups = len(to_analyse)
+        to_analyse = add_snapshot_date(to_analyse)
+        to_analyse.sort(key=lambda x: x[1])
+        to_delete = []
+        # keep backups with distances of day, month, year
+        for count, distance in ((keep["day"], datetime.timedelta(days=1)),
+                                (keep["month"], datetime.timedelta(days=30)),
+                                (keep["year"], datetime.timedelta(days=365))):
+            # keep in the next 'count' time periods 'distance' on backup
+            if not to_analyse and to_delete:
+                # No backups i the regular time distance.
+                # So reset and give the latest a new chance.
+                to_analyse = to_delete
+                to_analyse.sort(key=lambda x: x[1])
+                to_delete = []
+            precondition(count >= 0)
+            precondition(distance >= datetime.timedelta(days=1))
+            precondition(all(a[1] <= b[1] for a, b in zip(to_analyse, to_analyse[1:])))
+            while count > 0 and to_analyse:
+                # keep the last backup in the time period
+                path, latest = to_analyse.pop()
+                count -= 1
+                # delete all previous backups in the time period
+                while to_analyse and to_analyse[-1][1] > latest - distance:
+                    to_delete.append(to_analyse.pop())
+        # The rest of the list is to old
+        to_delete += to_analyse
+        # keep all backups which are the latest backup of a volume
+        # keep these to allow incremental copy to the destinations.
+        others = Config.list_last_snapshots(Config.get_subvolume(item))
+        precondition(len(others) > 0)
+        to_delete = [item for item in to_delete if item[0][-10:] not in others]
+        # check the delete list
+        max_delete = max(0, number_backups - max(1, keep["day"]))
+        if len(to_delete) > max_delete:
+            error_raise("the delete list is to long, program bug error")
+        # execute the deletes
+        for path, date in to_delete:
+            precondition(path.find(SNAPSHOT_NAME_MIDDLE) > 0)
+            precondition(os.path.basename(path).find(SNAPSHOT_NAME_MIDDLE) > 0)
+            logging.info(f"delete old snapshot {os.path.basename(path)}")
+            Run.delete_snapshot(path)
+    finally:
+        MountPoints.umount(uuid)
     return
 
 
@@ -1205,7 +1349,7 @@ def collect_all() -> List[str]:
     """
     connected = BlockDeviceList.list_uuid()
     names = Config.list_name(connected)
-    logging.info(f"connected are: ${', '.join(names)}")
+    logging.info(f"connected are: {', '.join(names)}")
     return names
 
 
@@ -1248,14 +1392,14 @@ def main(description: str = None) -> int:
     Config.set_verbose(arguments.verbose)
     # noinspection PyPep8,PyBroadException
     try:
+        if os.geteuid() != 0:
+            error_raise("Backup mounts the volumes. So it must run as root.")
         Config.load(arguments.conf)
         logging.info(f"Loaded configuration, ubackup {BACKUP_VERSION} runs")
         # Set verbose level again to optionally overwrite the config file
         Config.set_verbose(arguments.verbose)
         job_list = arguments.destinations if not arguments.all else collect_all()
         logging.info(f"creating backups with date {BACKUP_DATE}")
-        if os.geteuid() != 0:
-            error_raise("Backup mounts the volumes. So it must run as root.")
         if not job_list:
             if arguments.all:
                 logging.warning("no configured volumes are online")
@@ -1268,7 +1412,13 @@ def main(description: str = None) -> int:
                 logging.error(f"invalid backup destination {destination}")
         # The last snapshots are stored in the configuration file.
         Config.update(arguments.conf)
-        # TODO: thin away old backups/snapshots on all in job_list and all referenced sources
+        # Thin away old backups on BTRFS volumes
+        # (On other volumes the number of backups is fixed: simply the oldest
+        # backup will be replaced during the backup process.)
+        for destination in job_list:
+            if Config.check_item(destination):
+                if BlockDeviceList.is_btrfs(Config.get_uuid(destination)):
+                    thin_away(destination)
         # program end without errors:
         result = 0
     except RuntimeError as error:
