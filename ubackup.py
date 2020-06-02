@@ -737,7 +737,9 @@ class Run:
             # will not work. Use a time compare window of a little more than
             # 1 hour (=3600s) to prevent a file copy based on DST changes
             # because FAT stores the local time.
-            options = ["--times", "--links", "--recursive", "--modify-window=3700"]
+            # Do not use --links use only --safe-links because the rsync
+            # can not copy links to outside of the tree in a FAT.
+            options = ["--times", "--safe-links", "--recursive", "--modify-window=3700"]
         else:
             options = ["--archive", ]
         options += Run._verbose()
