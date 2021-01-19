@@ -41,7 +41,7 @@ the oldes backup on the volume.
 
 The program return code is 0 on success and 1 on a non recoverable error.
 
-The default configuration is ubackup.conf.json located  beside the script file,
+The default configuration is ubackup.conf located  beside the script file,
 in the current work directory or in ~/.config.
 
 The configuration file has json format. The subvolumes to backup and the
@@ -101,11 +101,11 @@ from typing import *
 ###############################################################################
 
 # Version
-BACKUP_VERSION = "2019-06-16"
+BACKUP_VERSION = "2021-01-19"
 
 # Default configuration file name.
 # Default location is beside the script.
-CONFIG_FILE = "ubackup.config.json"
+CONFIG_FILE = "ubackup.conf"
 
 # The date of the backup is a constant during running the backup script.
 # The date at the script start is used.
