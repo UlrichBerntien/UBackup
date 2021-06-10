@@ -8,10 +8,11 @@ Backup with BTRFS Snapshots
 - Create BTRFS snapshot on a source volume
 - Create maximal 1 snapshot per day
 - Copy snapshot to other BTRFS volume, uses automatically incremental copy
-- Copy snapshot via rsync to other volumes
+- Copy snapshot via rsync to other filesystem volumes, e.g. exfat
 - Configuration in json file
-- Identification of the volumes by UUIDs
-- Command line tool, could be integrated in cron or anacron
+- Identification of the source and destination volumes by UUIDs
+- Automatic decryption with cryptsetup tool  
+- Command line tool
 
 
 ## Design ideas
@@ -88,7 +89,7 @@ Another two HDD are external and only connected during the backup once per month
 The configuration file is created and changed with a simple text editor (e.g. vi).
 
 Source volume(s) and destination volume(s) are configured.
-All volumes are identified by their UUID.
+Most volumes are identified by their UUID.
 All subvolumes on the volumes are identified by name.
 
 You can specify multiple source subvolumes.
@@ -100,6 +101,22 @@ the name "source-subvolume-name plus creation-date".
 On a volume could be multiple subvolumes.
 Multiple source and multiple destination subvolumes on one volume are possible.
 But typical source and destination subvolumes are on different volumes.
+
+The destination volume (and also the source volumes) could be encrypted.
+A decryption of the volumes with the cryptsetup tool is implemented in the script
+and controlled by the configuration file.
+Current is the password input handled by the prompt of the cryptsetup tool.
+
+The cryptsetup supports Veracrypt encrypted volumes.
+With a backup to Veracrypt volume + exfat filesystem the backup
+could be read on MS Windows systems.
+
+Because the identification of encrypted partitions is complicated
+(e.g. UUID of Veracrypt encrypted volumes is not available ),
+the drive is identified by the combination of device vendor + device serial number.
+
+The decryption of the configured volumes starts automatic after script start.
+The solution is designe for external USB drives only connected during backup.
 
 The configuration file also contains the logging configuration.
 The log file is a simple text file.
@@ -138,7 +155,7 @@ A snapshot of the data subvolume will be created on the internal SSD.
 The BTRFS snapshot will be incrementally copied to the external HDD.
 Rsync will update a copy in the FAT file system on the external HDD.
 This will rescue if the internal SSD is broken.
-Also a rescue is possible if the BTRFS is damaged on source and snaphot.
+Also a rescue is possible if the BTRFS is damaged on source and snapshot.
 
 
 #### Typical usage of the backup tool on a small server/PC:
@@ -151,7 +168,7 @@ the internal HDD will sleep again.
 The old snapshot on the SSD will be automatically deleted,
 if it is not is needed for incremental copying to the external HDD.
 Snapshots on the internal SSD needed for incremental copy
-to a destination volume will be never deleted.
+to a destination volume will never be deleted.
 
 Once a week or once a month: Connect one of the two external HDDs
 and call `sudo ubackup.py -a`.
@@ -161,4 +178,4 @@ The snapshot will be incremental copied to the external HDD
 (and also to the internal HDD if a new snapshot was created).
 The script will call `rsync` to update a copy of the data subvolume on
 a volume with FAT file system on the external HDD.
-Older backups may be automatically deleted as configured.
+Older backups may automatically be deleted as configured.

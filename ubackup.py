@@ -36,8 +36,8 @@ in the configuration. The last n backups, the last backup of the last n month
 and the last backup of the last n years will be stored. Other older backups
 will be deleted.
 
-On other volumes the number of backups is constant. A new bachup will replace
-the oldes backup on the volume.
+On other volumes the number of backups is constant. A new backup will replace
+the oldest backup on the volume.
 
 The program return code is 0 on success and 1 on a non recoverable error.
 
@@ -101,7 +101,7 @@ from typing import *
 ###############################################################################
 
 # Version
-BACKUP_VERSION = "2021-01-19"
+BACKUP_VERSION = "2021-04-20"
 
 # Default configuration file name.
 # Default location is beside the script.
@@ -190,6 +190,10 @@ class Config:
     # The dictionary is a value of the _raw_config dictionary.
     _backup: dict = None
 
+    # The cryptsetup configuration.
+    # The dictionary is a value of the _raw_config dictionary.
+    _cryptsetup: dict = None
+
     # Status of the configuration data in _raw_config.
     # 0 = no config, 1 = config loaded, 2 = config changed
     _status: int = 0
@@ -256,13 +260,13 @@ class Config:
             logging.error(f"item {name} not defined.")
             return False
         cfg = cls._backup[name]
-        if "type" not in cfg or cfg["type"] not in ("destination", "source"):
+        if cfg.get("type") not in ("destination", "source"):
             logging.error(f"item {name} has no valid type")
             return False
-        if "uuid" not in cfg or not cfg["uuid"]:
+        if not cfg.get("uuid"):
             logging.error(f"item {name} has no uuid")
             return False
-        if "subvolume" not in cfg:
+        if not cfg.get("subvolume"):
             logging.error(f"item {name} contains no subvolume name")
             return False
         if "keep" in cfg:
@@ -327,6 +331,28 @@ class Config:
         return True
 
     @classmethod
+    def check_cryptosetup_partitions(cls, name: str, partitions: Dict) -> bool:
+        """
+        Checks if a valid source subvolume configuration is given.
+        Log errors if the item is not a source subvolume.
+        :param name: Name of the backup source subvolume.
+        :param partitions: List of partitions to check.
+        :return: True if and only if the source subvolume configuration is valid.
+        """
+        precondition(not_empty_str(name))
+        precondition(cls._status > 0)
+        for part in partitions.values():
+            if not part.get("part-id"):
+                logging.error(f"cryptsetup entry {name} has not part-id in paritions")
+                return False
+            if "options" not in part:
+                # an empty options list is ok.
+                logging.error(f"cryptsetup entry {name} has not options in paritions")
+                return False
+        # An empty list is ok
+        return True
+
+    @classmethod
     def is_destination(cls, name: str) -> str:
         """
         Checks if the configuration has type destination.
@@ -349,6 +375,22 @@ class Config:
         return [name
                 for name in cls._backup.keys()
                 if cls._backup[name]["uuid"] in uuid]
+
+    @classmethod
+    def list_cryptsetup_partitions(cls, disk_id: str) -> List[Tuple[str, List[str]]]:
+        """
+        Lists the partitions for a cryptsetup disk.
+        The returned list can be empty if the disk_id is not in the configuration
+        or an empty list of partitions is configured.
+        One entry in the partition list is A tuple of partition id and cryptsetup options.
+        :param disk_id: Disk-ID (vendor+serial) to search in the configuration
+        :return: List of all configured partitions.
+        """
+        precondition(not_empty_str(disk_id))
+        precondition(cls._status > 0)
+        partitions = cls._cryptsetup.get(disk_id, {})
+        precondition(cls.check_cryptosetup_partitions(disk_id, partitions))
+        return [(x["part-id"], x["options"]) for x in partitions.values()]
 
     @classmethod
     def list_last_snapshots(cls, subvolume: str) -> List[str]:
@@ -450,6 +492,11 @@ class Config:
             if not isinstance(cls._raw["backup"], dict):
                 error_raise("invalid backup configuration")
             cls._backup = cls._raw["backup"]
+            if "cryptsetup" not in cls._raw:
+                error_raise("no cryptsetup entry in configuration")
+            if not isinstance(cls._raw["cryptsetup"], dict):
+                error_raise("invalid cryptsetup configuration")
+            cls._cryptsetup = cls._raw["cryptsetup"]
             if "logging" in cls._raw:
                 logging.config.dictConfig(cls._raw["logging"])
             else:
@@ -499,7 +546,7 @@ class BlockDeviceList:
         :return: The lsblk output in a dict.
         """
         sub = subprocess.Popen(
-            ["lsblk", "--json", "--output", "uuid,fstype,mountpoint"],
+            ["lsblk", "--json", "--output", "fstype,mountpoint,name,serial,uuid,vendor"],
             stdout=subprocess.PIPE)
         stdout, stderr = sub.communicate()
         if sub.returncode:
@@ -507,22 +554,33 @@ class BlockDeviceList:
         return json.loads(stdout)
 
     @staticmethod
-    def _get(lsblk: Dict, uuid: str, entry: str) -> str:
+    def _get(lsblk: Dict, id_code: str, entry: str) -> str:
         """
-        Gets entry for uuid from the block device list.
+        Gets entry for uuid or device name from the block device list.
         :param lsblk: The output of a lsblk call.
-        :param uuid: The uuid of the block device.
+        :param id_code: The UUID of the volume or the device name (/dev/xxx).
         :param entry: This entry should be read.
-        :return: The value of the entry for the volume uuid.
+        :return: The value of the entry for the volume id.
         """
-        precondition(not_empty_str(uuid))
+        precondition(not_empty_str(id_code))
         precondition(not_empty_str(entry))
         if "blockdevices" not in lsblk.keys():
             error_raise("lsblk json structure unknown")
-        for item in lsblk["blockdevices"]:
-            if item["uuid"] == uuid:
-                return item[entry]
-        error_raise(f"volume {uuid} is not present")
+        if id_code.startswith("/dev/"):
+            # the id is a device name
+            name = id_code[5:]
+            def hit(it):
+                return it["name"] == name
+        else:
+            def hit(it):
+                return it["uuid"] == id_code
+        # search block devices and child block devices.
+        full_list = lsblk["blockdevices"]
+        for item in full_list:
+            if hit(item):
+                return item.get(entry)
+            full_list += item.get("children", [])
+        error_raise(f"volume {id_code} is not present")
 
     @staticmethod
     def is_fat(uuid: str) -> bool:
@@ -547,25 +605,52 @@ class BlockDeviceList:
         return BlockDeviceList._get(info, uuid, "fstype") == "btrfs"
 
     @staticmethod
-    def mount_point(uuid: str) -> str:
+    def mount_point(id_code: str) -> str:
         """
         Gets the mount point of the volume.
-        :param uuid: The uuid of the volume.
+        :param id_code: The UUID of the volume or the device name (/dev/xxx).
         :return: Mount point or None if not mounted.
         """
-        precondition(not_empty_str(uuid))
+        precondition(not_empty_str(id_code))
         info = BlockDeviceList._lsblk()
-        return BlockDeviceList._get(info, uuid, "mountpoint")
+        return BlockDeviceList._get(info, id_code, "mountpoint")
 
     @staticmethod
-    def is_mounted(uuid: str) -> bool:
+    def is_mounted(id_code: str) -> bool:
         """
         Checks if the volume is mounted.
-        :param uuid: The uuid of the volume.
+        :param id_code: The UUID of the volume or the device name (/dev/xxx).
         :return: True if and only if the volume is mounted.
         """
-        precondition(not_empty_str(uuid))
-        return BlockDeviceList.mount_point(uuid) is not None
+        precondition(not_empty_str(id_code))
+        return BlockDeviceList.mount_point(id_code) is not None
+
+    @staticmethod
+    def has_child(id_code: str) -> bool:
+        """
+        Checks if the volume has sub volumes (children).
+        :param id_code: The UUID of the volume or the device name (/dev/xxx).
+        :return: True if and only if the volume is mounted.
+        """
+        precondition(not_empty_str(id_code))
+        info = BlockDeviceList._lsblk()
+        return BlockDeviceList._get(info, id_code, "children") is not None
+
+    @staticmethod
+    def device_name(disk_id: str) -> str:
+        """
+        Gets the device name of the disk with given disk-ID.
+        Disk-ID is the block device vendor + serial number.
+        The device name is a string like "/dev/sdd".
+        :param disk_id: The disk-ID of the device.
+        :return: Name of the device.
+        """
+        precondition(not_empty_str(disk_id))
+        devices = BlockDeviceList._lsblk()
+        for x in devices["blockdevices"]:
+            if x.get("vendor") and x.get("serial") and x["vendor"] + x["serial"] == disk_id:
+                return "/dev/" + x["name"]
+        error_raise("device '{disk_id}}' no in block device list")
 
     @staticmethod
     def list_uuid() -> List[str]:
@@ -575,7 +660,24 @@ class BlockDeviceList:
         :return: List of UUIDs
         """
         devices = BlockDeviceList._lsblk()
-        return [x["uuid"] for x in devices["blockdevices"] if "uuid" in x and x["uuid"]]
+        result = []
+        full_list = devices["blockdevices"]
+        for item in full_list:
+            if item.get("uuid"):
+                result.append(item["uuid"])
+            full_list += item.get("children", [])
+        return result
+
+    @staticmethod
+    def list_disk_id() -> List[str]:
+        """
+        Gets list of the Disk-IDs of all connected block devices.
+        The Disk-ID is block device vendor + serial.
+        The returned list could be empty.
+        :return: List of Disk-IDs
+        """
+        devices = BlockDeviceList._lsblk()
+        return [x["vendor"] + x["serial"] for x in devices["blockdevices"] if x.get("vendor") and x.get("serial")]
 
 
 ###############################################################################
@@ -638,18 +740,6 @@ class Run:
         return
 
     @staticmethod
-    def sync() -> None:
-        """
-        Synchronize caches with the storage devices.
-        The sync could be take a while after backup or remove operations
-        with a lot of involved files.
-        """
-        error = subprocess.call(["sync"])
-        if error:
-            error_raise("sync failed")
-        return
-
-    @staticmethod
     def umount(mount_point: str) -> None:
         """
         Unmount a file system.
@@ -661,6 +751,50 @@ class Run:
                                 ["--lazy", "--no-mtab", mount_point])
         if error:
             error_raise("umount failed")
+        return
+
+    @staticmethod
+    def cryptsetup_open(device: str, name: str, options: List[str]) -> None:
+        """
+        Opens an encrypted volume with cryptsetup.
+        :param device: Name of the device to open, e.g. /dev/sdd1.
+        :param name: Name for the mapper, with out the prefix /dev/mapper/.
+        :param options: List of strings passed to the cryptsetup tool.
+        """
+        precondition(not_empty_str(device))
+        precondition(device.startswith("/dev/"))
+        precondition(not_empty_str(name))
+        precondition(not name.startswith("/dev/"))
+        logging.info(f"cryptsetup open {device} {name} {options}")
+        error = subprocess.call(["cryptsetup", "open", device, name] + options)
+        if error:
+            error_raise(f"cryptsetup open {device} failed")
+        return
+
+    @staticmethod
+    def cryptsetup_close(name: str) -> None:
+        """
+        Closes an encrypted volume with cryptsetup.
+        :param name: Name of the mapped device without the prefix /dev/mapper/.
+        """
+        precondition(not_empty_str(name))
+        precondition(not name.startswith("/dev/"))
+        logging.info(f"cryptsetup close {name}")
+        error = subprocess.call(["cryptsetup", "close", name])
+        if error:
+            error_raise(f"cryptsetup close {name} failed")
+        return
+
+    @staticmethod
+    def sync() -> None:
+        """
+        Synchronize caches with the storage devices.
+        The sync could be take a while after backup or remove operations
+        with a lot of involved files.
+        """
+        error = subprocess.call(["sync"])
+        if error:
+            error_raise("sync failed")
         return
 
     @staticmethod
@@ -803,7 +937,7 @@ class MountPoints:
         if not os.path.exists(tempdir):
             tempdir = tempfile.gettempdir()
         precondition(not_empty_str(tempdir))
-        cls._base = tempfile.mkdtemp(prefix="ubackup.", dir=tempdir)
+        cls._base = tempfile.mkdtemp(prefix="ubackup_", dir=tempdir)
         if not cls._base or not os.path.exists(cls._base):
             error_raise("can not create work directory")
         logging.info(f"use temporary work directory {cls._base}")
@@ -842,7 +976,7 @@ class MountPoints:
                 pass
         if not mount_point:
             precondition(uuid not in cls._mounts)
-            mount_point = tempfile.mkdtemp(prefix="mp.", dir=cls._base)
+            mount_point = tempfile.mkdtemp(dir=cls._base)
             if not mount_point or not os.path.exists(mount_point):
                 error_raise("can not create mount directory")
             readonly = mode == "r"
@@ -895,6 +1029,84 @@ class MountPoints:
             # rmdir removes only an empty directory, it is save to use.
             os.rmdir(cls._base)
             cls._base = None
+        return
+
+
+###############################################################################
+
+
+class Cryptsetup:
+    """
+    Opens encrypted volumes with cryptsetup.
+    The class is used like a singleton object: The methods are class-methods.
+    The members are class-variables.
+    """
+
+    # The current opened volumes, the names of the mapped devices.
+    _open_mappers: List[str] = []
+
+    # Value to make mapper names.
+    # Next value to create a number based name.
+    _next = 100
+
+    @classmethod
+    def create_mapper_name(cls) -> str:
+        """
+        Creates names to map the encrypted devices.
+        :return: A not-existing name for device mapping.
+        """
+        precondition(cls._next >= 100)
+        for i in range(cls._next, 1000):
+            name = "ubackup_" + str(i)
+            if not os.path.exists("/dev/mapper/" + name):
+                cls._next = i + 1
+                return name
+        error_raise("can not create a wrapper name")
+        return ""
+
+    @classmethod
+    def open(cls, device: str, options: List[str]) -> str:
+        """
+        Opens one encrypted volume.
+        Adds the volume to the open_mappers list
+        :param device: Device name, like /dev/sdd1
+        :param options: List of options to pass to cryptsetup, could be empty
+        :return: Name of the mapped device.
+        """
+        precondition(not_empty_str(device))
+        precondition(device.startswith("/dev/"))
+        name = cls.create_mapper_name()
+        precondition(not name.startswith("/dev/"))
+        Run.cryptsetup_open(device, name, options)
+        cls._open_mappers.append(name)
+        return name
+
+    @classmethod
+    def open_all(cls) -> None:
+        """
+        Opens crypted partitions for backup.
+        Opens all not mounted paritions in the configured cryptsetup list.
+        """
+        connected = BlockDeviceList.list_disk_id()
+        for disk_id in connected:
+            partition_list = Config.list_cryptsetup_partitions(disk_id)
+            if partition_list:
+                disk_name = BlockDeviceList.device_name(disk_id)
+                logging.info(f"found cryptosetup device, disk-ID '{disk_id}, device '{disk_name}'")
+                for part, options in partition_list:
+                    part_name = disk_name + str(part)
+                    if not BlockDeviceList.has_child(part_name):
+                        cls.open(part_name, options)
+        return
+
+    @classmethod
+    def close_all(cls) -> None:
+        """
+        Close all opened encrypted volumes.
+        """
+        for name in cls._open_mappers:
+            Run.cryptsetup_close(name)
+        cls._open_mappers = []
         return
 
 
@@ -1400,6 +1612,9 @@ def main(description: str = None) -> int:
         logging.info(f"Loaded configuration, ubackup {BACKUP_VERSION} runs")
         # Set verbose level again to optionally overwrite the config file
         Config.set_verbose(arguments.verbose)
+        # Open crypted partitions for backup.
+        Cryptsetup.open_all()
+        # use the destination list given at command line or collect all connected destinations
         job_list = arguments.destinations if not arguments.all else collect_all()
         logging.info(f"creating backups with date {BACKUP_DATE}")
         if not job_list:
@@ -1430,6 +1645,7 @@ def main(description: str = None) -> int:
     finally:
         # Clean up
         MountPoints.umount_all()
+        Cryptsetup.close_all()
     return result
 
 
