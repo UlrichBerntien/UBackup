@@ -875,13 +875,13 @@ class Run:
             # can not copy links to outside of the tree in a FAT.
             options = ["--times", "--safe-links", "--recursive", "--modify-window=3700"]
         else:
-            options = ["--archive", ]
+            options = ["--archive"]
         options += Run._verbose()
         error = subprocess.call(
-            ["rsync", "--one-file-system", "--delete-before"] +
+            ["rsync", "--one-file-system", "--delete-before", "--inplace"] +
             options +
             [source + "/", destination + "/"])
-        if error:
+        if error and error != 23:
             error_raise(f"rsync {source} to {destination} failed")
         return
 
